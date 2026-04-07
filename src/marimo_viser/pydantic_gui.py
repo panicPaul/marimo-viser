@@ -3,9 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import ast
+import html
+import inspect
 import json
+import math
+import textwrap
+import tokenize
 from dataclasses import dataclass
 from enum import Enum
+from functools import lru_cache
 from pathlib import Path
 from types import UnionType
 from typing import Any, Generic, Literal, TypeVar, get_args, get_origin
@@ -50,6 +57,7 @@ class _ArrayShape:
 
 @dataclass(frozen=True)
 class _FieldSpec:
+    model_cls: type[BaseModel]
     name: str
     annotation: Any
     info: FieldInfo
@@ -57,6 +65,14 @@ class _FieldSpec:
 
     def label(self) -> str:
         return self.info.title or self.name.replace("_", " ").capitalize()
+
+    def help_text(self) -> str | None:
+        if self.info.description:
+            return self.info.description
+        docstring_help = _docstring_help_for_field(self.model_cls, self.name)
+        if docstring_help:
+            return docstring_help
+        return _attribute_docstring_for_field(self.model_cls, self.name)
 
     def parse_frontend_value(
         self,
@@ -694,6 +710,7 @@ def _build_model_gui(
     for name, info in model_cls.model_fields.items():
         annotation = info.annotation
         spec = _FieldSpec(
+            model_cls=model_cls,
             name=name,
             annotation=annotation,
             info=info,
@@ -704,9 +721,9 @@ def _build_model_gui(
         field_specs[name] = spec
         elements[name] = element
         if spec.is_nested_model:
-            nested_tabs[spec.label()] = element
+            nested_tabs[spec.label()] = _with_help_text(element, spec.help_text())
         else:
-            direct_controls.append(element)
+            direct_controls.append(_with_help_text(element, spec.help_text()))
 
     if nested_tabs:
         direct_controls.append(mo.ui.tabs(nested_tabs))
@@ -742,6 +759,7 @@ def _build_model_json_gui(
     direct_payload: dict[str, Any] = {}
     for name, info in model_cls.model_fields.items():
         spec = _FieldSpec(
+            model_cls=model_cls,
             name=name,
             annotation=info.annotation,
             info=info,
@@ -757,7 +775,10 @@ def _build_model_json_gui(
                 label="",
             )
             elements[name] = nested_editor
-            nested_tabs[spec.label()] = nested_editor
+            nested_tabs[spec.label()] = _with_help_text(
+                nested_editor,
+                spec.help_text(),
+            )
         else:
             direct_field_names.append(name)
             direct_payload[name] = payload[name]
@@ -851,10 +872,14 @@ def _build_numeric_element(
         start, stop = _slider_limits(annotation, bounds)
         step = bounds.step
         if step is None:
-            if annotation is int:
-                step = 1
+            inferred_step = _infer_numeric_step(annotation, value)
+            if inferred_step is None:
+                if annotation is int:
+                    step = 1
+                else:
+                    step = max((stop - start) / _DEFAULT_SLIDER_STEPS, 1e-6)
             else:
-                step = max((stop - start) / _DEFAULT_SLIDER_STEPS, 1e-6)
+                step = inferred_step
         return mo.ui.slider(
             start=start,
             stop=stop,
@@ -864,8 +889,12 @@ def _build_numeric_element(
         )
 
     step = bounds.step
-    if step is None and annotation is int:
-        step = 1
+    if step is None:
+        inferred_step = _infer_numeric_step(annotation, value)
+        if inferred_step is not None:
+            step = inferred_step
+        elif annotation is int:
+            step = 1
     return mo.ui.number(
         start=bounds.lower,
         stop=bounds.upper,
@@ -888,6 +917,31 @@ def _build_array_element(
             f"supported limit of {_MAX_MATRIX_CELLS}."
         )
     return mo.ui.matrix(value=matrix_value, label=label)
+
+
+def _with_help_text(
+    element: UIElement[Any, Any],
+    help_text: str | None,
+) -> Any:
+    if not help_text:
+        return element
+    return mo.hstack(
+        [
+            element,
+            mo.md(
+                (
+                    "<span style="
+                    '"color: var(--mo-foreground-muted, #6b7280);'
+                    " font-style: italic;"
+                    ' font-size: 0.875em;">'
+                    f"{html.escape(help_text)}"
+                    "</span>"
+                )
+            ),
+        ],
+        align="start",
+        justify="start",
+    )
 
 
 def _resolve_initial_payload(
@@ -999,6 +1053,131 @@ def _numeric_bounds(info: FieldInfo) -> _NumericBounds:
         strict_lower=strict_lower,
         strict_upper=strict_upper,
     )
+
+
+def _infer_numeric_step(
+    annotation: type[int] | type[float],
+    value: int | float,
+) -> int | float | None:
+    if value == 0:
+        return 1 if annotation is int else None
+
+    magnitude = abs(float(value))
+    exponent = math.floor(math.log10(magnitude)) - 1
+
+    if annotation is int:
+        return max(1, 10**exponent)
+    return 10.0**exponent
+
+
+@lru_cache(maxsize=None)
+def _attribute_docstrings_for_model(
+    model_cls: type[BaseModel],
+) -> dict[str, str]:
+    try:
+        source = inspect.getsource(model_cls)
+    except (OSError, TypeError, tokenize.TokenError):
+        return {}
+
+    try:
+        module_ast = ast.parse(textwrap.dedent(source))
+    except SyntaxError:
+        return {}
+
+    class_node = next(
+        (
+            node
+            for node in ast.walk(module_ast)
+            if isinstance(node, ast.ClassDef) and node.name == model_cls.__name__
+        ),
+        None,
+    )
+    if class_node is None:
+        return {}
+
+    docs: dict[str, str] = {}
+    body = class_node.body
+    for index, node in enumerate(body[:-1]):
+        if not isinstance(node, ast.AnnAssign):
+            continue
+        target = node.target
+        if not isinstance(target, ast.Name):
+            continue
+        next_node = body[index + 1]
+        if not (
+            isinstance(next_node, ast.Expr)
+            and isinstance(next_node.value, ast.Constant)
+            and isinstance(next_node.value.value, str)
+        ):
+            continue
+        docs[target.id] = inspect.cleandoc(next_node.value.value)
+    return docs
+
+
+def _attribute_docstring_for_field(
+    model_cls: type[BaseModel],
+    field_name: str,
+) -> str | None:
+    return _attribute_docstrings_for_model(model_cls).get(field_name)
+
+
+@lru_cache(maxsize=None)
+def _docstring_args_for_model(
+    model_cls: type[BaseModel],
+) -> dict[str, str]:
+    doc = inspect.getdoc(model_cls)
+    if not doc:
+        return {}
+
+    lines = doc.splitlines()
+    args_start: int | None = None
+    for index, line in enumerate(lines):
+        if line.strip() in {"Args:", "Arguments:"}:
+            args_start = index + 1
+            break
+    if args_start is None:
+        return {}
+
+    result: dict[str, str] = {}
+    current_name: str | None = None
+    current_lines: list[str] = []
+
+    for raw_line in lines[args_start:]:
+        if not raw_line.strip():
+            if current_name is not None and current_lines:
+                current_lines.append("")
+            continue
+
+        indent = len(raw_line) - len(raw_line.lstrip())
+        stripped = raw_line.strip()
+
+        if indent == 0:
+            break
+
+        if ":" in stripped:
+            candidate_name, candidate_text = stripped.split(":", 1)
+            field_name = candidate_name.strip()
+            if field_name.isidentifier():
+                if current_name is not None:
+                    result[current_name] = "\n".join(current_lines).strip()
+                current_name = field_name
+                current_lines = [candidate_text.strip()]
+                continue
+
+        if current_name is not None:
+            current_lines.append(stripped)
+
+    if current_name is not None:
+        result[current_name] = "\n".join(current_lines).strip()
+
+    return {key: value for key, value in result.items() if value}
+
+
+def _docstring_help_for_field(
+    model_cls: type[BaseModel],
+    field_name: str,
+) -> str | None:
+    return _docstring_args_for_model(model_cls).get(field_name)
 
 
 def _slider_limits(

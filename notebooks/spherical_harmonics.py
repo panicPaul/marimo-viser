@@ -188,10 +188,14 @@ def _(INIT_FNS, SharedInitializationConfig):
 
 
     class DensificationConfig(_ConfigModel):
-        """Configuration for vanilla 3DGS densification."""
+        """Configuration for vanilla 3DGS densification.
+
+        Args:
+            enabled: this is a test for the enabled flag
+        """
 
         enabled: bool = True
-        reference_training_steps: int = 30_000 # NOTE: this will be overwritten by another config
+        reference_training_steps: int = Field(30_000 ,description="NOTE: this will be overwritten by another config")
         prune_opacity_threshold: float = 0.005
         image_plane_gradient_magnitude_threshold: float = 0.0002
         duplicate_max_normalized_scale_3d: float = 0.01
@@ -338,7 +342,11 @@ def _(INIT_FNS, SharedInitializationConfig):
 
 
     class Config(_ConfigModel):
-        """Top-level configuration for the vanilla 3DGS example."""
+        """Top-level configuration for the vanilla 3DGS example.
+
+        Args:
+            test_literal: Another test for the helptext generation
+        """
 
         # data: ColmapSourceConfig
         # train_dataset: DatasetConfig = Field(
@@ -353,7 +361,7 @@ def _(INIT_FNS, SharedInitializationConfig):
         )
         optimization: OptimizationConfig = Field(default_factory=OptimizationConfig)
         training: TrainingConfig = Field(default_factory=TrainingConfig)
-        test_flag: bool = False
+        test_flag: bool = Field(False, description="this is a test")
         test_literal: Literal['option_a', "option_b"]
 
         @model_validator(mode="after")
@@ -367,9 +375,12 @@ def _(INIT_FNS, SharedInitializationConfig):
     return (Config,)
 
 
-@app.cell
-def _():
-    return
+app._unparsable_cell(
+    r"""
+    ￼MARKDOWN
+    """,
+    name="_"
+)
 
 
 if __name__ == "__main__":

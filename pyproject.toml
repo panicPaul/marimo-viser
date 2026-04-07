@@ -23,6 +23,7 @@ dependencies = [
     "torch>=2.11.0",
     "traitlets>=5.14.3",
     "ty>=0.0.29",
+    "tyro>=1.0.12",
     "viser>=1.0.26",
 ]
 

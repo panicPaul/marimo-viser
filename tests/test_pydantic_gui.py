@@ -55,6 +55,44 @@ class _ListFallbackModel(BaseModel):
     save_at_steps: list[int]
 
 
+class _MagnitudeSliderModel(BaseModel):
+    large: int = Field(default=100, ge=0, le=1000)
+    small: float = Field(default=0.01, ge=0.0, le=1.0)
+
+
+class _MagnitudeNumberModel(BaseModel):
+    integer_zero: int = 0
+    integer_ten: int = 10
+    float_small: float = 0.01
+
+
+class _HelpTextModel(BaseModel):
+    count: int = Field(1, description="Visible field description.")
+    ratio: float = 0.1
+    """Visible attribute docstring."""
+
+
+class _NestedHelpInnerModel(BaseModel):
+    enabled: bool = True
+
+
+class _NestedHelpOuterModel(BaseModel):
+    inner: _NestedHelpInnerModel = _NestedHelpInnerModel()
+    """Outer nested helper text."""
+
+
+class _ArgsDocModel(BaseModel):
+    """Model with tyro-style field notes.
+
+    Args:
+        count: Docstring fallback text.
+        ratio: This should lose to the Field description.
+    """
+
+    count: int = 1
+    ratio: float = Field(0.1, description="Field description wins.")
+
+
 class _StringListFallbackModel(BaseModel):
     tags: list[str] = ["alpha", "beta"]
 
@@ -142,6 +180,42 @@ def test_path_fields_use_file_browser_and_nonexistent_defaults_fall_back() -> No
 
     assert type(generated.elements["source"]).__name__ == "file_browser"
     assert generated.elements["source"]._component_args["initial-path"] == str(Path.cwd())  # noqa: SLF001
+
+
+def test_numeric_slider_step_is_inferred_from_default_magnitude() -> None:
+    generated = PydanticGui(_MagnitudeSliderModel, include_json_editor=False)
+
+    assert generated.elements["large"]._component_args["step"] == 10  # noqa: SLF001
+    assert generated.elements["small"]._component_args["step"] == 0.001  # noqa: SLF001
+
+
+def test_numeric_number_step_stays_whole_for_integers() -> None:
+    generated = PydanticGui(_MagnitudeNumberModel, include_json_editor=False)
+
+    assert generated.elements["integer_zero"]._component_args["step"] == 1  # noqa: SLF001
+    assert generated.elements["integer_ten"]._component_args["step"] == 1  # noqa: SLF001
+    assert generated.elements["float_small"]._component_args["step"] == 0.001  # noqa: SLF001
+
+
+def test_form_gui_renders_field_help_text_from_description_and_docstring() -> None:
+    generated = PydanticGui(_HelpTextModel, include_json_editor=False)
+
+    assert "Visible field description." in generated.text
+    assert "Visible attribute docstring." in generated.text
+
+
+def test_form_gui_prefers_field_description_over_docstring_args() -> None:
+    generated = PydanticGui(_ArgsDocModel, include_json_editor=False)
+
+    assert "Docstring fallback text." in generated.text
+    assert "Field description wins." in generated.text
+    assert "This should lose to the Field description." not in generated.text
+
+
+def test_json_gui_renders_nested_help_text() -> None:
+    generated = PydanticJsonGui(_NestedHelpOuterModel)
+
+    assert "Outer nested helper text." in generated.text
 
 
 def test_fallback_text_fields_allow_pydantic_autocast() -> None:

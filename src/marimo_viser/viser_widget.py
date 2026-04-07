@@ -60,13 +60,12 @@ Nerfview:
               while True: time.sleep(1e-3)
 """
 
-import socket
 import json
+import socket
 import textwrap
 import threading
 import traceback
-from collections.abc import Iterator, MutableMapping
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, MutableMapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -75,8 +74,8 @@ import nerfview
 import numpy as np
 import traitlets
 import viser
-from marimo._plugins.ui._impl.from_anywidget import anywidget as MarimoAnyWidget
 from jaxtyping import Float, UInt8
+from marimo._plugins.ui._impl.from_anywidget import anywidget as MarimoAnyWidget
 from PIL import Image, ImageDraw, ImageFont
 
 # ---------------------------------------------------------------------------
@@ -204,12 +203,7 @@ def _render_error_image(
 
 def _markdown_error_block(message: str) -> str:
     """Format a render error for display in viser's markdown GUI."""
-    return (
-        "### render_fn failed\n\n"
-        "```text\n"
-        f"{message}\n"
-        "```"
-    )
+    return f"### render_fn failed\n\n```text\n{message}\n```"
 
 
 class _WidgetValueProxy(MutableMapping[str, object]):
@@ -230,7 +224,9 @@ class _WidgetValueProxy(MutableMapping[str, object]):
         setattr(self._widget, key, value)
 
     def __delitem__(self, key: str) -> None:
-        raise TypeError("Deleting widget traits through .value is not supported.")
+        raise TypeError(
+            "Deleting widget traits through .value is not supported."
+        )
 
     def __iter__(self) -> Iterator[str]:
         return iter(self._state())
@@ -242,6 +238,7 @@ class _WidgetValueProxy(MutableMapping[str, object]):
 # ---------------------------------------------------------------------------
 # Camera state type
 # ---------------------------------------------------------------------------
+
 
 @dataclass(frozen=True)
 class ViserCameraState:
@@ -263,7 +260,9 @@ class ViserCameraState:
     def from_camera(cls, camera: object) -> "ViserCameraState":
         """Build a typed state snapshot from a viser camera-like object."""
         up_direction = (
-            camera.up_direction if hasattr(camera, "up_direction") else camera.up
+            camera.up_direction
+            if hasattr(camera, "up_direction")
+            else camera.up
         )
         return cls(
             position=np.asarray(camera.position, dtype=np.float64).copy(),
@@ -305,9 +304,7 @@ class ViserCameraState:
             position=np.asarray(payload["position"], dtype=np.float64),
             wxyz=np.asarray(payload["wxyz"], dtype=np.float64),
             look_at=np.asarray(payload["look_at"], dtype=np.float64),
-            up_direction=np.asarray(
-                payload["up_direction"], dtype=np.float64
-            ),
+            up_direction=np.asarray(payload["up_direction"], dtype=np.float64),
             fov=float(payload["fov"]),
         )
 
@@ -487,7 +484,9 @@ class ViserMarimoWidget(MarimoAnyWidget):
         clients = self.server.get_clients()
         if client_id is not None:
             if client_id not in clients:
-                raise KeyError(f"No connected viser client with id {client_id}.")
+                raise KeyError(
+                    f"No connected viser client with id {client_id}."
+                )
             return clients[client_id]
         if not clients:
             return None
@@ -547,7 +546,9 @@ class ViserMarimoWidget(MarimoAnyWidget):
         clients = self.server.get_clients()
         if client_id is not None:
             if client_id not in clients:
-                raise KeyError(f"No connected viser client with id {client_id}.")
+                raise KeyError(
+                    f"No connected viser client with id {client_id}."
+                )
             target_clients = [clients[client_id]]
         else:
             target_clients = list(clients.values())
@@ -555,9 +556,9 @@ class ViserMarimoWidget(MarimoAnyWidget):
         fov_degrees = float(np.rad2deg(camera_state.fov))
         with self.server.atomic():
             if sync_gui and self.viewer is not None:
-                fov_slider = getattr(self.viewer, "_rendering_tab_handles", {}).get(
-                    "fov_degrees_slider"
-                )
+                fov_slider = getattr(
+                    self.viewer, "_rendering_tab_handles", {}
+                ).get("fov_degrees_slider")
                 if fov_slider is not None:
                     fov_slider.value = fov_degrees
             for client in target_clients:
@@ -590,7 +591,9 @@ class ViserMarimoWidget(MarimoAnyWidget):
         try:
             self._applying_camera_state_json = True
             try:
-                self.widget.camera_state_json = self.get_camera_state().to_json()
+                self.widget.camera_state_json = (
+                    self.get_camera_state().to_json()
+                )
             finally:
                 self._applying_camera_state_json = False
         except Exception:
@@ -715,7 +718,9 @@ def viser_marimo(
                         order=-10.0,
                     )
                 else:
-                    error_markdown_handle.content = _markdown_error_block(message)
+                    error_markdown_handle.content = _markdown_error_block(
+                        message
+                    )
 
                 if error_text_handle is None:
                     error_text_handle = server.gui.add_text(

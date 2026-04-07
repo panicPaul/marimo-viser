@@ -73,6 +73,40 @@ widget
 The returned `widget` is already reactive in marimo, so downstream cells can
 depend on `widget.value`.
 
+## Pydantic GUI
+
+You can also generate marimo controls from a small Pydantic model:
+
+```python
+from pydantic import BaseModel, Field
+
+from marimo_viser import form_gui
+
+
+class RenderSettings(BaseModel):
+    enabled: bool = True
+    steps: int = Field(default=32, ge=1, le=128)
+    opacity: float = Field(default=0.5, ge=0.0, le=1.0)
+    title: str = "viewer"
+```
+
+The generated UI is submit-gated and includes both structured controls and a
+JSON editor tab:
+
+```python
+form = form_gui(RenderSettings)
+form
+```
+
+Then in a downstream cell:
+
+```python
+submitted = form.value
+```
+
+`submitted` is either `None` before the first valid submit or a typed
+`RenderSettings` instance afterwards.
+
 ## Camera State
 
 The widget includes:

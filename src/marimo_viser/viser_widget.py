@@ -7,7 +7,7 @@ Two modes
 
     server, widget = viser_marimo()
     slider = server.gui.add_slider("scale", min=0.1, max=5.0, initial_value=1.0)
-    widget  # renders iframe + snapshot button
+    widget  # renders iframe + read/write camera controls
 
     # Re-runnable cell — scene calls are idempotent:
     server.scene.add_point_cloud("/pts", points=pts * slider.value)
@@ -36,13 +36,15 @@ server.scene.*  Keyed by path string -> safe to re-run freely.
 server.gui.*    Keyed by UUID -> creates duplicates on re-run.
                 Put GUI setup in the same cell as viser_marimo().
 
-The snapshot button
--------------------
-Pressing the snapshot button:
-  1. Saves the current camera into server.initial_camera, persisting the
-     viewpoint for new clients and viser's built-in "Reset View" button.
-  2. Fires any on_snapshot callbacks with a ViserCameraState named-tuple,
-     which you can use to cleanly rebuild duplicate GUI handles.
+Camera controls
+---------------
+The embedded widget exposes explicit camera controls instead of a snapshot
+abstraction:
+  1. "Read Camera" captures the current viewer camera into widget state.
+  2. "Write Camera" applies the stored widget camera state back to the viewer.
+
+You can also access the same typed state directly from Python with
+`widget.get_camera_state()` and `widget.set_camera_state(...)`.
 
 Graduating to a standalone script
 ----------------------------------
@@ -59,11 +61,13 @@ Nerfview:
 """
 
 import socket
+import json
 import textwrap
 import threading
 import traceback
-from collections import namedtuple
+from collections.abc import Iterator, MutableMapping
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 import anywidget
@@ -71,7 +75,8 @@ import nerfview
 import numpy as np
 import traitlets
 import viser
-from jaxtyping import UInt8
+from marimo._plugins.ui._impl.from_anywidget import anywidget as MarimoAnyWidget
+from jaxtyping import Float, UInt8
 from PIL import Image, ImageDraw, ImageFont
 
 # ---------------------------------------------------------------------------
@@ -207,76 +212,184 @@ def _markdown_error_block(message: str) -> str:
     )
 
 
+class _WidgetValueProxy(MutableMapping[str, object]):
+    """Live mapping view over synced anywidget traits."""
+
+    def __init__(self, widget: "_ViserAnyWidget") -> None:
+        self._widget = widget
+
+    def _state(self) -> dict[str, object]:
+        return self._widget.get_state()
+
+    def __getitem__(self, key: str) -> object:
+        return self._state()[key]
+
+    def __setitem__(self, key: str, value: object) -> None:
+        if not self._widget.has_trait(key):
+            raise KeyError(key)
+        setattr(self._widget, key, value)
+
+    def __delitem__(self, key: str) -> None:
+        raise TypeError("Deleting widget traits through .value is not supported.")
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._state())
+
+    def __len__(self) -> int:
+        return len(self._state())
+
+
 # ---------------------------------------------------------------------------
-# Camera snapshot type
+# Camera state type
 # ---------------------------------------------------------------------------
 
-ViserCameraState = namedtuple(
-    "ViserCameraState",
-    ["position", "wxyz", "look_at", "up_direction", "fov"],
-)
-"""Snapshot of the viser camera captured when the snapshot button is pressed.
+@dataclass(frozen=True)
+class ViserCameraState:
+    """Serializable camera state for reading, writing, and syncing viewers.
 
-Fields:
-    position:     (3,) float64 camera position in world coordinates.
-    wxyz:         (4,) float64 orientation quaternion, OpenCV convention.
-    look_at:      (3,) float64 point the camera looks at.
-    up_direction: (3,) float64 camera up vector.
-    fov:          float vertical field of view in radians.
+    Note:
+        This is distinct from nerfview.CameraState, which nerfview constructs
+        internally and passes to your render_fn. That type carries .c2w and
+        .get_K(); this one carries the raw viser camera fields.
+    """
 
-Note:
-    This is distinct from nerfview.CameraState, which nerfview constructs
-    internally and passes to your render_fn. That type carries .c2w and
-    .get_K(); this one carries the raw viser camera fields.
-"""
+    position: Float[np.ndarray, "3"]
+    wxyz: Float[np.ndarray, "4"]
+    look_at: Float[np.ndarray, "3"]
+    up_direction: Float[np.ndarray, "3"]
+    fov: float
+
+    @classmethod
+    def from_camera(cls, camera: object) -> "ViserCameraState":
+        """Build a typed state snapshot from a viser camera-like object."""
+        up_direction = (
+            camera.up_direction if hasattr(camera, "up_direction") else camera.up
+        )
+        return cls(
+            position=np.asarray(camera.position, dtype=np.float64).copy(),
+            wxyz=np.asarray(camera.wxyz, dtype=np.float64).copy(),
+            look_at=np.asarray(camera.look_at, dtype=np.float64).copy(),
+            up_direction=np.asarray(up_direction, dtype=np.float64).copy(),
+            fov=float(camera.fov),
+        )
+
+    def apply_to_camera(self, camera: object) -> None:
+        """Write this state onto a viser camera-like object."""
+        camera.position = self.position.copy()
+        if hasattr(camera, "wxyz"):
+            camera.wxyz = self.wxyz.copy()
+        camera.look_at = self.look_at.copy()
+        if hasattr(camera, "up_direction"):
+            camera.up_direction = self.up_direction.copy()
+        else:
+            camera.up = self.up_direction.copy()
+        camera.fov = self.fov
+
+    def to_json(self) -> str:
+        """Serialize the camera state into a stable JSON string."""
+        return json.dumps(
+            {
+                "position": self.position.tolist(),
+                "wxyz": self.wxyz.tolist(),
+                "look_at": self.look_at.tolist(),
+                "up_direction": self.up_direction.tolist(),
+                "fov": self.fov,
+            }
+        )
+
+    @classmethod
+    def from_json(cls, value: str) -> "ViserCameraState":
+        """Deserialize a camera state from JSON."""
+        payload = json.loads(value)
+        return cls(
+            position=np.asarray(payload["position"], dtype=np.float64),
+            wxyz=np.asarray(payload["wxyz"], dtype=np.float64),
+            look_at=np.asarray(payload["look_at"], dtype=np.float64),
+            up_direction=np.asarray(
+                payload["up_direction"], dtype=np.float64
+            ),
+            fov=float(payload["fov"]),
+        )
 
 
 # ---------------------------------------------------------------------------
-# anywidget (snapshot button + iframe)
+# anywidget (camera controls + iframe)
 # ---------------------------------------------------------------------------
 
 
 class _ViserAnyWidget(anywidget.AnyWidget):
-    """Internal anywidget rendering a snapshot button above a viser iframe.
+    """Internal anywidget rendering camera controls above a viser iframe.
 
     Not intended for direct instantiation — use viser_marimo() instead.
 
     Attributes:
         port: The port that the viser HTTP/WebSocket server is listening on.
         height: Height of the embedded iframe in pixels.
-        _snapshot_counter: Incremented by the JS button on each click; observed
-            by Python to trigger snapshot logic without polling.
+        _read_camera_counter: Incremented by the JS read button to trigger a
+            camera read in Python.
+        _write_camera_counter: Incremented by the JS write button to trigger a
+            camera write in Python.
     """
 
     port = traitlets.Int(8080).tag(sync=True)
     height = traitlets.Int(600).tag(sync=True)
-    _snapshot_counter = traitlets.Int(0).tag(sync=True)
+    _read_camera_counter = traitlets.Int(0).tag(sync=True)
+    _write_camera_counter = traitlets.Int(0).tag(sync=True)
+    camera_state_json = traitlets.Unicode("").tag(sync=True)
 
     _esm = textwrap.dedent("""\
         function render({ model, el }) {
 
-            // --- Snapshot button ------------------------------------------
-            const button = document.createElement("button");
-            button.textContent = "📷 Snapshot";
-            button.title = "Save camera position; fire on_snapshot callbacks";
-            Object.assign(button.style, {
-                display:      "block",
+            // --- Camera controls -----------------------------------------
+            const controls = document.createElement("div");
+            Object.assign(controls.style, {
+                display: "flex",
+                gap: "8px",
                 marginBottom: "6px",
-                padding:      "4px 12px",
-                fontSize:     "12px",
-                cursor:       "pointer",
-                borderRadius: "6px",
-                border:       "1px solid #ccc",
-                background:   "#f5f5f5",
             });
-            button.addEventListener("click", () => {
-                model.set("_snapshot_counter",
-                          model.get("_snapshot_counter") + 1);
+
+            function makeButton(label, title) {
+                const button = document.createElement("button");
+                button.textContent = label;
+                button.title = title;
+                Object.assign(button.style, {
+                    padding:      "4px 12px",
+                    fontSize:     "12px",
+                    cursor:       "pointer",
+                    borderRadius: "6px",
+                    border:       "1px solid #ccc",
+                    background:   "#f5f5f5",
+                });
+                return button;
+            }
+
+            const readButton = makeButton(
+                "Save Camera State",
+                "Capture the current viewer camera state into the widget",
+            );
+            readButton.addEventListener("click", () => {
+                model.set(
+                    "_read_camera_counter",
+                    model.get("_read_camera_counter") + 1,
+                );
                 model.save_changes();
-                button.textContent = "✓ Saved";
-                setTimeout(() => { button.textContent = "📷 Snapshot"; }, 1200);
             });
-            el.appendChild(button);
+
+            const writeButton = makeButton(
+                "Restore Saved Camera State",
+                "Apply the stored camera state back to the viewer",
+            );
+            writeButton.addEventListener("click", () => {
+                model.set(
+                    "_write_camera_counter",
+                    model.get("_write_camera_counter") + 1,
+                );
+                model.save_changes();
+            });
+
+            controls.appendChild(readButton);
+            controls.appendChild(writeButton);
+            el.appendChild(controls);
 
             // --- iframe ---------------------------------------------------
             function makeIframe() {
@@ -323,21 +436,13 @@ class _ViserAnyWidget(anywidget.AnyWidget):
 # ---------------------------------------------------------------------------
 
 
-class ViserMarimoWidget:
-    """Container returned by viser_marimo().
+class ViserMarimoWidget(MarimoAnyWidget):
+    """Marimo-reactive widget returned by viser_marimo().
 
-    Holds the ViserServer, the optional nerfview Viewer, and the anywidget,
-    and owns the snapshot button plumbing.
-
-    Display in marimo by writing the variable name as the last expression in a
-    cell — _repr_mimebundle_ is implemented so the iframe renders directly
-    without needing to access .widget.
-
-    Attributes:
-        server: The underlying ViserServer. Use for all scene and GUI calls.
-        viewer: The nerfview Viewer, or None in viser-only mode.
-        widget: The raw anywidget instance. Only needed if you want to pass it
-            to mo.ui.anywidget() for marimo reactive bindings.
+    This wraps the underlying anywidget in a marimo UIElement so the returned
+    object is directly displayable and reactive in notebook cells while still
+    carrying the `viser` server, optional `nerfview` viewer, and camera-state
+    helper methods.
     """
 
     def __init__(
@@ -346,100 +451,167 @@ class ViserMarimoWidget:
         anywidget_instance: _ViserAnyWidget,
         viewer: object | None = None,
     ) -> None:
+        super().__init__(anywidget_instance)
         self.server = server
         self.viewer = viewer
-        self.widget = anywidget_instance
-        self._snapshot_callbacks: list[Callable[[ViserCameraState], None]] = []
-        self._callbacks_lock = threading.Lock()
+        self._applying_camera_state_json = False
         anywidget_instance.observe(
-            self._on_snapshot_counter_change,
-            names=["_snapshot_counter"],
+            self._on_read_camera_counter_change,
+            names=["_read_camera_counter"],
+        )
+        anywidget_instance.observe(
+            self._on_write_camera_counter_change,
+            names=["_write_camera_counter"],
+        )
+        anywidget_instance.observe(
+            self._on_camera_state_json_change,
+            names=["camera_state_json"],
         )
 
-    # ------------------------------------------------------------------
-    # marimo display protocol
-    # ------------------------------------------------------------------
+    def anywidget(self) -> _ViserAnyWidget:
+        """Return the underlying raw anywidget instance."""
+        return self.widget
 
-    def _repr_mimebundle_(self, **kwargs) -> dict:
-        return self.widget._repr_mimebundle_(**kwargs)
+    @property
+    def value(self) -> MutableMapping[str, object]:
+        """Live mapping of synced widget traits.
 
-    # ------------------------------------------------------------------
-    # Snapshot plumbing
-    # ------------------------------------------------------------------
-
-    def _on_snapshot_counter_change(self, change: dict) -> None:
-        """Traitlets observer — offloads snapshot work to a daemon thread."""
-        threading.Thread(target=self._execute_snapshot, daemon=True).start()
-
-    def _execute_snapshot(self) -> None:
-        """Read the current camera and fire all registered callbacks.
-
-        Reads camera state from the first connected client, persists it into
-        server.initial_camera (so viser's Reset View and new clients start
-        there), then calls each registered on_snapshot callback in order.
+        Reads reflect the current widget state, and item assignment writes
+        back to the underlying anywidget trait, e.g.
+        `widget.value["camera_state_json"] = ...`.
         """
+        return _WidgetValueProxy(self.widget)
+
+    def _get_client_handle(self, client_id: int | None = None) -> object | None:
+        """Return the requested client handle, or the first connected client."""
         clients = self.server.get_clients()
+        if client_id is not None:
+            if client_id not in clients:
+                raise KeyError(f"No connected viser client with id {client_id}.")
+            return clients[client_id]
         if not clients:
-            return
+            return None
+        return next(iter(clients.values()))
 
-        camera = next(iter(clients.values())).camera
-        camera_state = ViserCameraState(
-            position=camera.position.copy(),
-            wxyz=camera.wxyz.copy(),
-            look_at=camera.look_at.copy(),
-            up_direction=camera.up_direction.copy(),
-            fov=camera.fov,
-        )
-
-        initial_camera = self.server.initial_camera
-        initial_camera.position = camera_state.position
-        initial_camera.look_at = camera_state.look_at
-        initial_camera.up = camera_state.up_direction
-        initial_camera.fov = camera_state.fov
-
-        with self._callbacks_lock:
-            callbacks = list(self._snapshot_callbacks)
-
-        for callback in callbacks:
-            try:
-                callback(camera_state)
-            except Exception:
-                traceback.print_exc()
-
-    def on_snapshot(
+    def get_camera_state(
         self,
-        fn: Callable[[ViserCameraState], None],
-    ) -> Callable[[ViserCameraState], None]:
-        """Register a callback to run when the snapshot button is pressed.
-
-        The callback receives a ViserCameraState named-tuple containing the
-        camera position, orientation, look-at point, up direction, and field
-        of view at the moment of the snapshot.
-
-        The primary use is to cleanly rebuild GUI handles that have accumulated
-        duplicates across cell re-runs:
-
-            @widget.on_snapshot
-            def _(camera_state):
-                nonlocal slider
-                saved_value = slider.value
-                slider.remove()
-                slider = server.gui.add_slider(
-                    "scale", min=0.1, max=5.0, initial_value=saved_value
-                )
-
-        Multiple callbacks can be registered and run in registration order.
-        Can be used as a decorator or called directly as widget.on_snapshot(fn).
+        client_id: int | None = None,
+    ) -> ViserCameraState:
+        """Read the current camera state from a client or the saved reset view.
 
         Args:
-            fn: Callable accepting a ViserCameraState, returning None.
+            client_id: Optional viser client id. If omitted, the first connected
+                client is used. If no client is connected, the saved reset view
+                (`server.initial_camera`) is returned.
 
         Returns:
-            fn unchanged, so the method works as a decorator.
+            A typed camera state suitable for storing or passing to
+            `set_camera_state`.
         """
-        with self._callbacks_lock:
-            self._snapshot_callbacks.append(fn)
-        return fn
+        client = self._get_client_handle(client_id)
+        if client is not None:
+            return ViserCameraState.from_camera(client.camera)
+        return ViserCameraState.from_camera(self.server.initial_camera)
+
+    @property
+    def camera_state(self) -> ViserCameraState | None:
+        """Return the last widget-synced camera state, if available."""
+        value = self.widget.camera_state_json
+        if not value:
+            return None
+        return ViserCameraState.from_json(value)
+
+    def set_camera_state(
+        self,
+        camera_state: ViserCameraState,
+        *,
+        client_id: int | None = None,
+        update_reset_view: bool = True,
+        sync_gui: bool = True,
+    ) -> None:
+        """Apply a camera state to the live viewer and optionally reset view.
+
+        Args:
+            camera_state: Typed camera state returned by `get_camera_state`.
+            client_id: Optional viser client id. If omitted, the state is
+                applied to all connected clients.
+            update_reset_view: Whether to also persist the state into
+                `server.initial_camera` so new clients and viser's built-in
+                "Reset View" use it.
+            sync_gui: Whether to also synchronize matching nerfview GUI state,
+                such as the FOV slider, when a viewer is present.
+        """
+        if update_reset_view:
+            camera_state.apply_to_camera(self.server.initial_camera)
+
+        clients = self.server.get_clients()
+        if client_id is not None:
+            if client_id not in clients:
+                raise KeyError(f"No connected viser client with id {client_id}.")
+            target_clients = [clients[client_id]]
+        else:
+            target_clients = list(clients.values())
+
+        fov_degrees = float(np.rad2deg(camera_state.fov))
+        with self.server.atomic():
+            if sync_gui and self.viewer is not None:
+                fov_slider = getattr(self.viewer, "_rendering_tab_handles", {}).get(
+                    "fov_degrees_slider"
+                )
+                if fov_slider is not None:
+                    fov_slider.value = fov_degrees
+            for client in target_clients:
+                camera_state.apply_to_camera(client.camera)
+
+        self._applying_camera_state_json = True
+        try:
+            self.widget.camera_state_json = camera_state.to_json()
+        finally:
+            self._applying_camera_state_json = False
+        if self.viewer is not None:
+            self.viewer.rerender(None)
+
+    # ------------------------------------------------------------------
+    # Camera control plumbing
+    # ------------------------------------------------------------------
+
+    def _on_read_camera_counter_change(self, change: dict) -> None:
+        """Traitlets observer — offloads camera reads to a daemon thread."""
+        del change
+        threading.Thread(target=self._execute_read_camera, daemon=True).start()
+
+    def _on_write_camera_counter_change(self, change: dict) -> None:
+        """Traitlets observer — offloads camera writes to a daemon thread."""
+        del change
+        threading.Thread(target=self._execute_write_camera, daemon=True).start()
+
+    def _execute_read_camera(self) -> None:
+        """Capture the current camera and sync it into the widget state."""
+        try:
+            self._applying_camera_state_json = True
+            try:
+                self.widget.camera_state_json = self.get_camera_state().to_json()
+            finally:
+                self._applying_camera_state_json = False
+        except Exception:
+            traceback.print_exc()
+
+    def _execute_write_camera(self) -> None:
+        """Apply the synced widget camera state back to the viewer."""
+        try:
+            camera_state = self.camera_state
+            if camera_state is None:
+                return
+            self.set_camera_state(camera_state)
+        except Exception:
+            traceback.print_exc()
+
+    def _on_camera_state_json_change(self, change: dict) -> None:
+        """Apply programmatic camera-state writes back to the live viewer."""
+        del change
+        if self._applying_camera_state_json:
+            return
+        threading.Thread(target=self._execute_write_camera, daemon=True).start()
 
 
 # ---------------------------------------------------------------------------
@@ -497,18 +669,14 @@ def viser_marimo(
         Viser-only::
 
             server, widget = viser_marimo()
-            slider = server.gui.add_slider("scale", min=0.1, max=5.0, initial_value=1.0)
+            slider = server.gui.add_slider(
+                "scale", min=0.1, max=5.0, initial_value=1.0
+            )
 
-            @widget.on_snapshot
-            def _(camera_state):
-                nonlocal slider
-                saved_value = slider.value
-                slider.remove()
-                slider = server.gui.add_slider(
-                    "scale", min=0.1, max=5.0, initial_value=saved_value
-                )
+            camera_state = widget.get_camera_state()
+            widget.set_camera_state(camera_state)
 
-            widget  # last expression in cell — renders iframe + snapshot button
+            widget  # last expression in cell — renders iframe + camera controls
 
             # In a separate re-runnable cell:
             server.scene.add_point_cloud("/pts", points=pts * slider.value)

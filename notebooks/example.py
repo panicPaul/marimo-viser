@@ -4,19 +4,11 @@ __generated_with = "0.22.4"
 app = marimo.App(width="columns")
 
 with app.setup:
-    import anywidget
-    import jaxtyping
     import marimo as mo
-    import matplotlib
     import nerfview
     import numpy as np
-    import ruff
-    import splines
-    import torch
-    import traitlets
-    import viser
     from jaxtyping import UInt8
-    from marimo_viser.viser_widget import viser_marimo
+    from marimo_viser.viser_widget import ViserCameraState, viser_marimo
 
 
 @app.function
@@ -53,18 +45,6 @@ def render_fn(
 
 
 @app.cell
-def _():
-    server, viewer, widget = viser_marimo(render_fn=render_fn)
-    return server, widget
-
-
-@app.cell
-def _(widget):
-    widget
-    return
-
-
-@app.cell
 def _(server):
     server.gui.add_slider('scale', min=0.0, max=5.0, step=0.1, initial_value=0.0)
     return
@@ -72,11 +52,38 @@ def _(server):
 
 @app.cell
 def _():
+    server_2, viewer_2, widget_2 = viser_marimo(render_fn=render_fn)
+    return (widget_2,)
+
+
+@app.cell
+def _(widget, widget_2):
+    widget_2.value["camera_state_json"] = widget.value["camera_state_json"]
+    return
+
+
+@app.cell
+def _(widget_2):
+    widget_2.value["camera_state_json"]
     return
 
 
 @app.cell(column=1)
 def _():
+    server, viewer, widget = viser_marimo(render_fn=render_fn)
+    widget
+    return server, widget
+
+
+@app.cell
+def _(widget):
+    widget.value["camera_state_json"]
+    return
+
+
+@app.cell
+def _(widget_2):
+    widget_2
     return
 
 

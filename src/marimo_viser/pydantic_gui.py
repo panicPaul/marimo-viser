@@ -3,16 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-import ast
 import html
-import inspect
 import json
 import math
-import textwrap
-import tokenize
 from dataclasses import dataclass
 from enum import Enum
-from functools import lru_cache
 from pathlib import Path
 from types import UnionType
 from typing import Any, Generic, Literal, TypeVar, get_args, get_origin
@@ -28,6 +23,7 @@ from marimo._runtime.commands import UpdateUIElementCommand
 from marimo._runtime.context import ContextNotInitializedError, get_context
 from pydantic import BaseModel, ValidationError
 from pydantic.fields import FieldInfo
+from tyro import _docstrings as _tyro_docstrings
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
@@ -69,10 +65,7 @@ class _FieldSpec:
     def help_text(self) -> str | None:
         if self.info.description:
             return self.info.description
-        docstring_help = _docstring_help_for_field(self.model_cls, self.name)
-        if docstring_help:
-            return docstring_help
-        return _attribute_docstring_for_field(self.model_cls, self.name)
+        return _tyro_help_text_for_field(self.model_cls, self.name)
 
     def parse_frontend_value(
         self,
@@ -1070,114 +1063,14 @@ def _infer_numeric_step(
     return 10.0**exponent
 
 
-@lru_cache(maxsize=None)
-def _attribute_docstrings_for_model(
-    model_cls: type[BaseModel],
-) -> dict[str, str]:
-    try:
-        source = inspect.getsource(model_cls)
-    except (OSError, TypeError, tokenize.TokenError):
-        return {}
-
-    try:
-        module_ast = ast.parse(textwrap.dedent(source))
-    except SyntaxError:
-        return {}
-
-    class_node = next(
-        (
-            node
-            for node in ast.walk(module_ast)
-            if isinstance(node, ast.ClassDef) and node.name == model_cls.__name__
-        ),
-        None,
-    )
-    if class_node is None:
-        return {}
-
-    docs: dict[str, str] = {}
-    body = class_node.body
-    for index, node in enumerate(body[:-1]):
-        if not isinstance(node, ast.AnnAssign):
-            continue
-        target = node.target
-        if not isinstance(target, ast.Name):
-            continue
-        next_node = body[index + 1]
-        if not (
-            isinstance(next_node, ast.Expr)
-            and isinstance(next_node.value, ast.Constant)
-            and isinstance(next_node.value.value, str)
-        ):
-            continue
-        docs[target.id] = inspect.cleandoc(next_node.value.value)
-    return docs
-
-
-def _attribute_docstring_for_field(
+def _tyro_help_text_for_field(
     model_cls: type[BaseModel],
     field_name: str,
 ) -> str | None:
-    return _attribute_docstrings_for_model(model_cls).get(field_name)
-
-
-@lru_cache(maxsize=None)
-def _docstring_args_for_model(
-    model_cls: type[BaseModel],
-) -> dict[str, str]:
-    doc = inspect.getdoc(model_cls)
-    if not doc:
-        return {}
-
-    lines = doc.splitlines()
-    args_start: int | None = None
-    for index, line in enumerate(lines):
-        if line.strip() in {"Args:", "Arguments:"}:
-            args_start = index + 1
-            break
-    if args_start is None:
-        return {}
-
-    result: dict[str, str] = {}
-    current_name: str | None = None
-    current_lines: list[str] = []
-
-    for raw_line in lines[args_start:]:
-        if not raw_line.strip():
-            if current_name is not None and current_lines:
-                current_lines.append("")
-            continue
-
-        indent = len(raw_line) - len(raw_line.lstrip())
-        stripped = raw_line.strip()
-
-        if indent == 0:
-            break
-
-        if ":" in stripped:
-            candidate_name, candidate_text = stripped.split(":", 1)
-            field_name = candidate_name.strip()
-            if field_name.isidentifier():
-                if current_name is not None:
-                    result[current_name] = "\n".join(current_lines).strip()
-                current_name = field_name
-                current_lines = [candidate_text.strip()]
-                continue
-
-        if current_name is not None:
-            current_lines.append(stripped)
-
-    if current_name is not None:
-        result[current_name] = "\n".join(current_lines).strip()
-
-    return {key: value for key, value in result.items() if value}
-
-
-def _docstring_help_for_field(
-    model_cls: type[BaseModel],
-    field_name: str,
-) -> str | None:
-    return _docstring_args_for_model(model_cls).get(field_name)
+    try:
+        return _tyro_docstrings.get_field_docstring(model_cls, field_name, ())
+    except Exception:
+        return None
 
 
 def _slider_limits(

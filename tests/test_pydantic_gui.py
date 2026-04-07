@@ -93,6 +93,10 @@ class _ArgsDocModel(BaseModel):
     ratio: float = Field(0.1, description="Field description wins.")
 
 
+class _InlineCommentModel(BaseModel):
+    count: int = 1  # Inline comment help text.
+
+
 class _StringListFallbackModel(BaseModel):
     tags: list[str] = ["alpha", "beta"]
 
@@ -210,6 +214,12 @@ def test_form_gui_prefers_field_description_over_docstring_args() -> None:
     assert "Docstring fallback text." in generated.text
     assert "Field description wins." in generated.text
     assert "This should lose to the Field description." not in generated.text
+
+
+def test_form_gui_renders_inline_comment_help_text_via_tyro() -> None:
+    generated = PydanticGui(_InlineCommentModel, include_json_editor=False)
+
+    assert "Inline comment help text." in generated.text
 
 
 def test_json_gui_renders_nested_help_text() -> None:

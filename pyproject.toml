@@ -6,7 +6,7 @@ readme = "README.md"
 authors = [
     { name = "Paul Schlack" }
 ]
-requires-python = ">=3.14"
+requires-python = ">=3.11"
 dependencies = [
     "anywidget>=0.10.0",
     "auto-mix-prep>=0.2.0",
@@ -15,6 +15,7 @@ dependencies = [
     "matplotlib>=3.10.8",
     "nerfview>=0.1.3",
     "numpy>=2.4.4",
+    "opencv-python>=4.13.0.92", # for faster jpeg encoding needed in viser
     "ruff>=0.15.9",
     "splines>=0.3.3",
     "torch>=2.11.0",

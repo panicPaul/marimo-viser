@@ -55,7 +55,23 @@ def render_fn(
 @app.cell
 def _():
     server, viewer, widget = viser_marimo(render_fn=render_fn)
+    return server, widget
+
+
+@app.cell
+def _(widget):
     widget
+    return
+
+
+@app.cell
+def _(server):
+    server.gui.add_slider('scale', min=0.0, max=5.0, step=0.1, initial_value=0.0)
+    return
+
+
+@app.cell
+def _():
     return
 
 

@@ -63,13 +63,16 @@ import textwrap
 import threading
 import traceback
 from collections import namedtuple
-from typing import Callable
+from collections.abc import Callable
+from pathlib import Path
 
 import anywidget
+import nerfview
 import numpy as np
 import traitlets
 import viser
 from jaxtyping import UInt8
+from PIL import Image, ImageDraw, ImageFont
 
 # ---------------------------------------------------------------------------
 # Port helper
@@ -99,6 +102,108 @@ def _find_free_port(start: int = 8080, attempts: int = 64) -> int:
                 continue
     raise RuntimeError(
         f"Could not find a free port in range {start}–{start + attempts}."
+    )
+
+
+def _format_render_exception(exception: BaseException) -> str:
+    """Return a concise render error summary followed by the full traceback."""
+    frames = traceback.extract_tb(exception.__traceback__)
+    location = None
+    for frame in reversed(frames):
+        filename = Path(frame.filename)
+        if "site-packages/nerfview" in frame.filename:
+            continue
+        if filename.name == "viser_widget.py":
+            continue
+        location = frame
+        break
+
+    lines = [f"render_fn failed: {exception.__class__.__name__}: {exception}"]
+    if location is not None:
+        location_text = (
+            f"{location.filename}:{location.lineno} in {location.name}"
+        )
+        lines.append(f"Location: {location_text}")
+        if location.line:
+            lines.append(f"Code: {location.line.strip()}")
+
+    lines.extend(
+        [
+            "",
+            "Traceback:",
+            "".join(
+                traceback.format_exception(
+                    exception.__class__,
+                    exception,
+                    exception.__traceback__,
+                )
+            ).rstrip(),
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _render_error_image(
+    message: str,
+    width: int,
+    height: int,
+) -> UInt8[np.ndarray, "height width 3"]:
+    """Render an exception summary into an RGB fallback image."""
+    image = Image.new("RGB", (width, height), color=(40, 6, 12))
+    draw = ImageDraw.Draw(image)
+    title_font = ImageFont.load_default(size=24)
+    body_font = ImageFont.load_default(size=18)
+
+    padding = 20
+    title_height = 30
+    line_height = 22
+    draw.rectangle(
+        [(0, 0), (width - 1, height - 1)],
+        outline=(241, 174, 181),
+        width=2,
+    )
+    draw.text(
+        (padding, padding),
+        "render_fn failed",
+        fill=(255, 220, 220),
+        font=title_font,
+    )
+
+    max_chars = max(16, (width - 2 * padding) // 10)
+    wrapped_lines: list[str] = []
+    for raw_line in message.splitlines():
+        segments = textwrap.wrap(
+            raw_line,
+            width=max_chars,
+            replace_whitespace=False,
+            drop_whitespace=False,
+        )
+        wrapped_lines.extend(segments or [""])
+
+    y = padding + title_height + 8
+    max_lines = max(1, (height - y - padding) // line_height)
+    for line in wrapped_lines[:max_lines]:
+        draw.text((padding, y), line, fill=(255, 240, 240), font=body_font)
+        y += line_height
+
+    if len(wrapped_lines) > max_lines:
+        draw.text(
+            (padding, height - padding - line_height),
+            "...",
+            fill=(255, 240, 240),
+            font=body_font,
+        )
+
+    return np.asarray(image, dtype=np.uint8)
+
+
+def _markdown_error_block(message: str) -> str:
+    """Format a render error for display in viser's markdown GUI."""
+    return (
+        "### render_fn failed\n\n"
+        "```text\n"
+        f"{message}\n"
+        "```"
     )
 
 
@@ -426,25 +531,114 @@ def viser_marimo(
     resolved_port = port if port is not None else _find_free_port()
     server = viser.ViserServer(host=host, port=resolved_port)
     anywidget_instance = _ViserAnyWidget(port=resolved_port, height=height)
+    wrapped_widget = ViserMarimoWidget(server, anywidget_instance, viewer=None)
 
     viewer = None
     if render_fn is not None:
-        try:
-            import nerfview
-        except ImportError as error:
-            raise ImportError(
-                "render_fn requires nerfview. Install it with:\n"
-                "  pip install nerfview"
-            ) from error
+        error_markdown_handle: viser.GuiMarkdownHandle | None = None
+        error_text_handle = None
+
+        def _show_gui_error(message: str) -> None:
+            nonlocal error_markdown_handle, error_text_handle
+            with server.atomic():
+                if error_markdown_handle is None:
+                    error_markdown_handle = server.gui.add_markdown(
+                        _markdown_error_block(message),
+                        order=-10.0,
+                    )
+                else:
+                    error_markdown_handle.content = _markdown_error_block(message)
+
+                if error_text_handle is None:
+                    error_text_handle = server.gui.add_text(
+                        "Render Traceback",
+                        message,
+                        multiline=True,
+                        disabled=True,
+                        order=-9.0,
+                    )
+                else:
+                    error_text_handle.value = message
+
+        def _clear_gui_error() -> None:
+            nonlocal error_markdown_handle, error_text_handle
+            with server.atomic():
+                if error_markdown_handle is not None:
+                    error_markdown_handle.remove()
+                    error_markdown_handle = None
+                if error_text_handle is not None:
+                    error_text_handle.remove()
+                    error_text_handle = None
+
+        def _get_fallback_render(
+            render_state: object,
+        ) -> UInt8[np.ndarray, "height width 3"]:
+            width = 1
+            height_px = 1
+            if hasattr(render_state, "viewer_width") and hasattr(
+                render_state, "viewer_height"
+            ):
+                width = max(1, int(render_state.viewer_width))
+                height_px = max(1, int(render_state.viewer_height))
+            elif (
+                isinstance(render_state, tuple)
+                and len(render_state) == 2
+                and all(isinstance(value, int) for value in render_state)
+            ):
+                width = max(1, int(render_state[0]))
+                height_px = max(1, int(render_state[1]))
+            return np.zeros((height_px, width, 3), dtype=np.uint8)
+
+        def _report_render_error(
+            exception: BaseException,
+            render_state: object,
+        ) -> object:
+            message = _format_render_exception(exception)
+            traceback.print_exception(
+                exception.__class__,
+                exception,
+                exception.__traceback__,
+            )
+            _show_gui_error(message)
+            fallback = _get_fallback_render(render_state)
+            return _render_error_image(
+                message,
+                width=fallback.shape[1],
+                height=fallback.shape[0],
+            )
+
+        def _safe_render_fn(
+            camera_state: object, render_state: object
+        ) -> object:
+            try:
+                rendered = render_fn(camera_state, render_state)
+            except TypeError as first_error:
+                # Support older nerfview render_fns that still expect (camera_state, img_wh).
+                if hasattr(render_state, "viewer_width") and hasattr(
+                    render_state, "viewer_height"
+                ):
+                    img_wh = (
+                        int(render_state.viewer_width),
+                        int(render_state.viewer_height),
+                    )
+                    try:
+                        rendered = render_fn(camera_state, img_wh)
+                    except Exception as second_error:
+                        return _report_render_error(second_error, render_state)
+                else:
+                    return _report_render_error(first_error, render_state)
+            except Exception as error:
+                return _report_render_error(error, render_state)
+
+            _clear_gui_error()
+            return rendered
+
         viewer = nerfview.Viewer(
             server=server,
-            render_fn=render_fn,
+            render_fn=_safe_render_fn,
             mode=mode,
         )
-
-    wrapped_widget = ViserMarimoWidget(
-        server, anywidget_instance, viewer=viewer
-    )
+        wrapped_widget.viewer = viewer
 
     if viewer is None:
         return server, wrapped_widget

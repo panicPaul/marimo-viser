@@ -109,3 +109,10 @@ convention = "google"
     "F401",       # Unused imports from marimo
     "RUF059",     # Unused unpacked variable
 ]
+"src/marimo_viser/notebooks/*" = [
+    "ANN",        # Require function type annotations doesn't work well with marimo cell defs
+    "B018",       # Useless expressions can be nice for output visualization in marimo
+    "D",          # Notebook cells and generated structure are not docstring-oriented
+    "F401",       # Unused imports from marimo are normal in notebooks
+    "RUF059",     # Unused unpacked variable
+]

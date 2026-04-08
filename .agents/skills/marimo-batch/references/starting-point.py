@@ -50,8 +50,9 @@ def _(env_config, is_script_mode, wandb):
 
 @app.cell
 def _(ModelParams, mo, wandb):
-    from wigglystuff import EnvConfig
     import sys
+
+    from wigglystuff import EnvConfig
 
     is_script_mode = mo.app_meta().mode == "script"
 
@@ -80,7 +81,9 @@ def _(ModelParams, mo, wandb):
                 if hasattr(field.annotation, "__name__")
                 else str(field.annotation)
             )
-            table.add_row(flag, type_name, str(field.default), field.description or "")
+            table.add_row(
+                flag, type_name, str(field.default), field.description or ""
+            )
 
         Console().print(table)
         sys.exit(0)
@@ -112,15 +115,20 @@ def _(params_form):
 def _():
     import hashlib
     import json
-    from pydantic import computed_field, BaseModel, Field
 
+    from pydantic import BaseModel, Field, computed_field
 
     class ModelParams(BaseModel):
-        epochs: int = Field(default=25, description="Number of training epochs.")
+        epochs: int = Field(
+            default=25, description="Number of training epochs."
+        )
         batch_size: int = Field(default=32, description="Training batch size.")
-        learning_rate: float = Field(default=1e-4, description="Learning rate for AdamW.")
+        learning_rate: float = Field(
+            default=1e-4, description="Learning rate for AdamW."
+        )
         wandb_project: str = Field(
-            default="batch-sizes", description="W&B project name (empty to skip)."
+            default="batch-sizes",
+            description="W&B project name (empty to skip).",
         )
 
         @computed_field
@@ -136,7 +144,9 @@ def _():
                 "batch_size": self.batch_size,
                 "learning_rate": self.learning_rate,
             }
-            h = hashlib.md5(json.dumps(params_dict, sort_keys=True).encode()).hexdigest()[:6]
+            h = hashlib.md5(
+                json.dumps(params_dict, sort_keys=True).encode()
+            ).hexdigest()[:6]
             return "-".join(parts) + f"-{h}"
 
     return (ModelParams,)
@@ -154,8 +164,12 @@ def _(mo):
     """)
         .batch(
             epochs=mo.ui.slider(10, 50, value=50, step=1, label="epochs"),
-            batch_size=mo.ui.slider(8, 512, value=32, step=8, label="batch size"),
-            learning_rate=mo.ui.slider(1e-5, 5e-4, value=1e-4, step=1e-5, label="learning rate"),
+            batch_size=mo.ui.slider(
+                8, 512, value=32, step=8, label="batch size"
+            ),
+            learning_rate=mo.ui.slider(
+                1e-5, 5e-4, value=1e-4, step=1e-5, label="learning rate"
+            ),
         )
         .form()
     )
@@ -170,7 +184,9 @@ def _(ModelParams, is_script_mode, mo, params_form):
     )
 
     if is_script_mode:
-        model_params = ModelParams(**{k.replace("-", "_"): v for k, v in mo.cli_args().items()})
+        model_params = ModelParams(
+            **{k.replace("-", "_"): v for k, v in mo.cli_args().items()}
+        )
     else:
         model_params = ModelParams(**params_form.value)
     return (model_params,)
@@ -242,7 +258,9 @@ def _(mo, model, model_params, nn, torch, train_loader, wandb):
             config=model_params.model_dump(),
         )
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=model_params.learning_rate)
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=model_params.learning_rate
+    )
     loss_fn = nn.MSELoss()
 
     with mo.status.progress_bar(total=model_params.epochs) as bar:

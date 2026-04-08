@@ -16,6 +16,7 @@ dependencies = [
     "nerfview>=0.1.3",
     "numpy>=2.4.4",
     "opencv-python>=4.13.0.92", # for faster jpeg encoding needed in viser
+    "pre-commit>=4.5.1",
     "pydantic>=2.12.5",
     "pytest>=9.0.2",
     "ruff>=0.15.9",
@@ -40,6 +41,7 @@ build-backend = "uv_build"
 
 [tool.ruff]
 line-length = 80  # Must match above
+extend-exclude = [".agents"]
 
 
 [tool.ruff.lint] # Mostly just copied over from mojo
@@ -98,4 +100,10 @@ extend-select = [
 convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["ANN", "D"] # Docstrings aren't strictly required in test files
+"tests/*" = ["ANN", "D"]
+"notebooks/*" = [
+    "ANN",        # Require function type annotations doesn't work well with marimos def _()
+    "B018",       # Useless expresions can be nice for output visualization in marimo
+    "F401",       # Unused imports from marimo
+    "RUF059",     # Unused unpacked variable
+]

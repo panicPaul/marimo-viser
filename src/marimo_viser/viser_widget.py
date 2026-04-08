@@ -105,7 +105,7 @@ def _find_free_port(start: int = 8080, attempts: int = 64) -> int:
             except OSError:
                 continue
     raise RuntimeError(
-        f"Could not find a free port in range {start}–{start + attempts}."
+        f"Could not find a free port in range {start}-{start + attempts}."
     )
 
 

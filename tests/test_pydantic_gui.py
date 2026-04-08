@@ -9,8 +9,8 @@ import torch
 from jaxtyping import Float
 from pydantic import BaseModel, ConfigDict, Field
 
-from marimo_viser import form_gui, json_gui
 import marimo_viser.pydantic_gui as pgui
+from marimo_viser import form_gui, json_gui
 from marimo_viser.pydantic_gui import (
     _DIRECT_JSON_EDITOR_KEY,
     PydanticGui,
@@ -42,7 +42,7 @@ class _ArrayModel(BaseModel):
 class _TensorModel(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    weights: Float[torch.Tensor, "3"] = torch.zeros(3)
+    weights: Float[torch.Tensor, "3"] = torch.zeros(3)  # noqa: UP037
 
 
 class _PathModel(BaseModel):
@@ -207,7 +207,9 @@ def test_numpy_arrays_round_trip_through_matrix_updates() -> None:
 
     assert isinstance(generated.value.weights, np.ndarray)
     assert generated.value.weights.shape == (2, 2)
-    assert np.allclose(generated.value.weights, np.array([[1.0, 2.0], [3.0, 4.0]]))
+    assert np.allclose(
+        generated.value.weights, np.array([[1.0, 2.0], [3.0, 4.0]])
+    )
 
 
 def test_torch_arrays_round_trip_through_matrix_updates() -> None:
@@ -219,10 +221,14 @@ def test_torch_arrays_round_trip_through_matrix_updates() -> None:
 
     assert isinstance(generated.value.weights, torch.Tensor)
     assert generated.value.weights.shape == (3,)
-    assert torch.allclose(generated.value.weights, torch.tensor([1.0, 2.0, 3.0]))
+    assert torch.allclose(
+        generated.value.weights, torch.tensor([1.0, 2.0, 3.0])
+    )
 
 
-def test_path_fields_use_file_browser_and_nonexistent_defaults_fall_back() -> None:
+def test_path_fields_use_file_browser_and_nonexistent_defaults_fall_back() -> (
+    None
+):
     generated = PydanticGui(
         _PathModel,
         value={"source": Path("/definitely/not/here/file.txt")},
@@ -230,25 +236,29 @@ def test_path_fields_use_file_browser_and_nonexistent_defaults_fall_back() -> No
     )
 
     assert type(generated.elements["source"]).__name__ == "file_browser"
-    assert generated.elements["source"]._component_args["initial-path"] == str(Path.cwd())  # noqa: SLF001
+    assert generated.elements["source"]._component_args["initial-path"] == str(
+        Path.cwd()
+    )
 
 
 def test_numeric_slider_step_is_inferred_from_default_magnitude() -> None:
     generated = PydanticGui(_MagnitudeSliderModel, include_json_editor=False)
 
-    assert generated.elements["large"]._component_args["step"] == 10  # noqa: SLF001
-    assert generated.elements["small"]._component_args["step"] == 0.001  # noqa: SLF001
+    assert generated.elements["large"]._component_args["step"] == 10
+    assert generated.elements["small"]._component_args["step"] == 0.001
 
 
 def test_numeric_number_step_stays_whole_for_integers() -> None:
     generated = PydanticGui(_MagnitudeNumberModel, include_json_editor=False)
 
-    assert generated.elements["integer_zero"]._component_args["step"] == 1  # noqa: SLF001
-    assert generated.elements["integer_ten"]._component_args["step"] == 1  # noqa: SLF001
-    assert generated.elements["float_small"]._component_args["step"] == 0.001  # noqa: SLF001
+    assert generated.elements["integer_zero"]._component_args["step"] == 1
+    assert generated.elements["integer_ten"]._component_args["step"] == 1
+    assert generated.elements["float_small"]._component_args["step"] == 0.001
 
 
-def test_form_gui_renders_field_help_text_from_description_and_docstring() -> None:
+def test_form_gui_renders_field_help_text_from_description_and_docstring() -> (
+    None
+):
     generated = PydanticGui(_HelpTextModel, include_json_editor=False)
 
     assert "Visible field description." in generated.text
@@ -300,7 +310,9 @@ def test_submit_validation_accepts_structured_text_field_defaults(
 ) -> None:
     generated = form_gui(_StringListFallbackModel)
 
-    assert generated.validate(generated.element._current_frontend_value()) is None
+    assert (
+        generated.validate(generated.element._current_frontend_value()) is None
+    )
 
 
 def test_submit_validation_accepts_nested_structured_text_field_defaults(
@@ -308,7 +320,9 @@ def test_submit_validation_accepts_nested_structured_text_field_defaults(
 ) -> None:
     generated = form_gui(_NestedFallbackOuterModel)
 
-    assert generated.validate(generated.element._current_frontend_value()) is None
+    assert (
+        generated.validate(generated.element._current_frontend_value()) is None
+    )
 
 
 def test_json_gui_parses_nested_models() -> None:

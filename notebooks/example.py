@@ -1,14 +1,16 @@
+"""Example marimo notebook for the viser widget."""
+
 import marimo
 
 __generated_with = "0.22.4"
 app = marimo.App(width="columns")
 
 with app.setup:
-    import marimo as mo
     import nerfview
     import numpy as np
     from jaxtyping import UInt8
-    from marimo_viser.viser_widget import ViserCameraState, viser_marimo
+
+    from marimo_viser.viser_widget import viser_marimo
 
 
 @app.function
@@ -16,6 +18,7 @@ def render_fn(
     camera_state: nerfview.CameraState,
     render_tab_state: nerfview.RenderTabState,
 ) -> UInt8[np.ndarray, "H W 3"]:
+    """Render a dummy RGB image for the current viewer camera."""
     # Get camera parameters.
     width = render_tab_state.viewer_width
     height = render_tab_state.viewer_height
@@ -46,7 +49,9 @@ def render_fn(
 
 @app.cell
 def _(server):
-    server.gui.add_slider('scale', min=0.0, max=5.0, step=0.1, initial_value=0.0)
+    server.gui.add_slider(
+        "scale", min=0.0, max=5.0, step=0.1, initial_value=0.0
+    )
     return
 
 

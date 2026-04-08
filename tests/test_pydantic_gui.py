@@ -4,11 +4,13 @@ from datetime import date
 from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
 from jaxtyping import Float
 from pydantic import BaseModel, ConfigDict, Field
 
 from marimo_viser import form_gui, json_gui
+import marimo_viser.pydantic_gui as pgui
 from marimo_viser.pydantic_gui import (
     _DIRECT_JSON_EDITOR_KEY,
     PydanticGui,
@@ -110,7 +112,14 @@ class _NestedFallbackOuterModel(BaseModel):
     inner: _NestedStringListModel = _NestedStringListModel()
 
 
-def test_form_gui_returns_submit_gated_form() -> None:
+@pytest.fixture
+def notebook_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(pgui.mo, "running_in_notebook", lambda: True)
+
+
+def test_form_gui_returns_submit_gated_form(
+    notebook_mode: None,
+) -> None:
     generated = form_gui(_RequiredModel)
 
     assert generated.value is None
@@ -118,12 +127,50 @@ def test_form_gui_returns_submit_gated_form() -> None:
     assert generated.validate({"title": "demo", "count": 4}) is None
 
 
-def test_json_gui_returns_submit_gated_json_editor() -> None:
+def test_json_gui_returns_submit_gated_json_editor(
+    notebook_mode: None,
+) -> None:
     generated = json_gui(_RequiredModel)
 
     assert generated.value is None
     assert isinstance(generated.element, PydanticJsonGui)
     assert generated.validate('{"title": "demo", "count": 4}') is None
+
+
+def test_form_gui_uses_tyro_in_script_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected = _RequiredModel(title="cli", count=3)
+
+    monkeypatch.setattr(pgui.mo, "running_in_notebook", lambda: False)
+    monkeypatch.setattr(pgui.tyro, "cli", lambda *args, **kwargs: expected)
+
+    generated = form_gui(_RequiredModel)
+
+    assert generated.value == expected
+    assert generated.element is None
+    assert generated.validate is None
+
+
+def test_json_gui_uses_tyro_default_in_script_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_cli(*args: object, **kwargs: object) -> _RequiredModel:
+        captured.update(kwargs)
+        return kwargs["default"]  # type: ignore[index]
+
+    monkeypatch.setattr(pgui.mo, "running_in_notebook", lambda: False)
+    monkeypatch.setattr(pgui.tyro, "cli", _fake_cli)
+
+    generated = json_gui(
+        _RequiredModel,
+        value={"title": "seeded", "count": 2},
+    )
+
+    assert generated.value == _RequiredModel(title="seeded", count=2)
+    assert captured["default"] == _RequiredModel(title="seeded", count=2)
 
 
 def test_pydantic_json_gui_clone_uses_internal_state() -> None:
@@ -248,13 +295,17 @@ def test_fallback_text_fields_parse_json_literals_when_needed() -> None:
     assert generated.value == _ListFallbackModel(save_at_steps=[])
 
 
-def test_submit_validation_accepts_structured_text_field_defaults() -> None:
+def test_submit_validation_accepts_structured_text_field_defaults(
+    notebook_mode: None,
+) -> None:
     generated = form_gui(_StringListFallbackModel)
 
     assert generated.validate(generated.element._current_frontend_value()) is None
 
 
-def test_submit_validation_accepts_nested_structured_text_field_defaults() -> None:
+def test_submit_validation_accepts_nested_structured_text_field_defaults(
+    notebook_mode: None,
+) -> None:
     generated = form_gui(_NestedFallbackOuterModel)
 
     assert generated.validate(generated.element._current_frontend_value()) is None

@@ -16,6 +16,7 @@ import annotated_types
 import marimo as mo
 import numpy as np
 import torch
+import tyro
 from jaxtyping import AbstractArray
 from marimo._plugins.core.web_component import JSONType
 from marimo._plugins.ui._core.ui_element import UIElement
@@ -49,6 +50,13 @@ class _NumericBounds:
 class _ArrayShape:
     ndim: int
     fixed_shape: tuple[int, ...] | None
+
+
+@dataclass(frozen=True)
+class _ScriptCliResult(Generic[ModelT]):
+    value: ModelT
+    element: None = None
+    validate: None = None
 
 
 @dataclass(frozen=True)
@@ -655,6 +663,10 @@ def form_gui(
     submit_label: str = "Submit",
 ):
     """Create a submit-gated marimo UI from a Pydantic model."""
+    if not mo.running_in_notebook():
+        default = _resolve_cli_default(model_cls, value)
+        return _ScriptCliResult(tyro.cli(model_cls, default=default))
+
     model_gui = PydanticGui(
         model_cls,
         value=value,
@@ -679,6 +691,10 @@ def json_gui(
     submit_label: str = "Submit",
 ):
     """Create a submit-gated JSON editor for a Pydantic model."""
+    if not mo.running_in_notebook():
+        default = _resolve_cli_default(model_cls, value)
+        return _ScriptCliResult(tyro.cli(model_cls, default=default))
+
     model_gui = PydanticJsonGui(model_cls, value=value, label=label)
     form = model_gui.form(
         label=label,
@@ -729,6 +745,17 @@ def _build_model_gui(
         layout = mo.vstack(direct_controls)
 
     return field_specs, elements, layout
+
+
+def _resolve_cli_default(
+    model_cls: type[ModelT],
+    value: ModelT | dict[str, Any] | None,
+) -> ModelT | Any:
+    if value is None:
+        return tyro.MISSING_NONPROP
+    if isinstance(value, model_cls):
+        return value
+    return model_cls.model_validate(value)
 
 
 def _build_model_json_gui(

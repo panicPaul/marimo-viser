@@ -136,14 +136,22 @@ def coefficients_to_tensor(config: object) -> Tensor:
 
 @app.function
 def sh_to_rgb(sh_values: Tensor) -> UInt8[Tensor, "*batch 3"]:
-    """Convert SH outputs into displayable uint8 RGB values."""
+    """Convert raw degree-0 SH coefficients into displayable uint8 RGB values."""
+    rgb = torch.clamp((sh_values * 0.2820947917738781) + 0.5, 0.0, 1.0)
+    return (rgb * 255.0).to(torch.uint8)
+
+
+@app.function
+def evaluated_sh_to_rgb(sh_values: Tensor) -> UInt8[Tensor, "*batch 3"]:
+    """Convert evaluated SH values into displayable uint8 RGB values."""
     rgb = torch.clamp(sh_values + 0.5, 0.0, 1.0)
     return (rgb * 255.0).to(torch.uint8)
 
 
-@app.cell
-def _():
-    return
+@app.function
+def rgb_to_sh(rgb: Tensor) -> Float[Tensor, "*batch 3"]:
+    """Convert range [0,1] RGB to sh_0 coeffs."""
+    return (rgb - 0.5) / 0.2820947917738781
 
 
 @app.cell(column=1, hide_code=True)
@@ -333,7 +341,7 @@ def render_spheres(
         sphere_center,
         sphere_radius,
     )
-    point_rgb = sh_to_rgb(
+    point_rgb = evaluated_sh_to_rgb(
         spherical_harmonics(
             ray_origin[None, :],
             coefficients,
@@ -360,7 +368,7 @@ def render_spheres(
     )
     axis_t = torch.where(right_hit, right_t, torch.zeros_like(right_t))
     axis_points = ray_origin[None, None, :] + axis_t[..., None] * right_ray_dirs
-    axis_rgb = sh_to_rgb(
+    axis_rgb = evaluated_sh_to_rgb(
         spherical_harmonics(
             axis_points[right_hit],
             coefficients,
@@ -552,9 +560,8 @@ def _():
     in 3DGS. `degrees_to_use` truncates evaluation without hiding the
     higher-order tabs.
 
-    The current display mapping is `clip(sh + 0.5, 0, 1)`, so zero SH appears
-    as neutral gray. Under this convention, a saturated color needs the other
-    channels pushed negative, not just the target channel pushed positive.
+    Degree-0 coefficients use the 3DGS-style mapping `clip(sh * C0 + 0.5, 0, 1)`.
+    Evaluated SH values use `clip(value + 0.5, 0, 1)`.
     """)
     return
 
@@ -582,7 +589,7 @@ def _():
 @app.function
 def default_coefficients(rows: int) -> np.ndarray:
     """Create zero SH coefficients for a neutral gray sphere."""
-    return np.zeros((rows, 3), dtype=np.float32)
+    return np.ones((rows, 3), dtype=np.float32) * -0.0
 
 
 @app.class_definition
@@ -592,16 +599,14 @@ class SH0(BaseModel):
     coefficients: PyArray[Float, float, "1 3"] = Field(
         default_factory=lambda: default_coefficients(1),
         description=(
-            "Degree-0 RGB coefficient block. With the current display "
-            "mapping `clip(sh + 0.5, 0, 1)`, zero gives neutral gray. "
-            "For a pure red appearance, raising only red is not enough; "
-            "you also need to suppress green and blue, e.g. "
-            "`[0.5, -0.5, -0.5]`."
+            "Degree-0 RGB coefficient block. Zero gives neutral gray. "
+            "Because this is an SH coefficient, a saturated color usually "
+            "also needs negative values in the other channels."
         ),
         json_schema_extra={
-            "matrix_min": -1.0,
-            "matrix_max": 1.0,
-            "matrix_step": 0.01,
+            "matrix_min": -1.8,
+            "matrix_max": 1.8,
+            "matrix_step": 0.025,
         },
     )
 
@@ -614,9 +619,9 @@ class SH1(BaseModel):
         default_factory=lambda: default_coefficients(3),
         description="Degree-1 RGB coefficient block.",
         json_schema_extra={
-            "matrix_min": -1.0,
-            "matrix_max": 1.0,
-            "matrix_step": 0.01,
+            "matrix_min": -2.0,
+            "matrix_max": 2.0,
+            "matrix_step": 0.025,
         },
     )
 
@@ -629,9 +634,9 @@ class SH2(BaseModel):
         default_factory=lambda: default_coefficients(5),
         description="Degree-2 RGB coefficient block.",
         json_schema_extra={
-            "matrix_min": -1.0,
-            "matrix_max": 1.0,
-            "matrix_step": 0.01,
+            "matrix_min": -2.0,
+            "matrix_max": 2.0,
+            "matrix_step": 0.025,
         },
     )
 
@@ -644,9 +649,9 @@ class SH3(BaseModel):
         default_factory=lambda: default_coefficients(7),
         description="Degree-3 RGB coefficient block.",
         json_schema_extra={
-            "matrix_min": -1.0,
-            "matrix_max": 1.0,
-            "matrix_step": 0.01,
+            "matrix_min": -2.0,
+            "matrix_max": 2.0,
+            "matrix_step": 0.025,
         },
     )
 
@@ -659,11 +664,16 @@ class SH4(BaseModel):
         default_factory=lambda: default_coefficients(9),
         description="Degree-4 RGB coefficient block.",
         json_schema_extra={
-            "matrix_min": -1.0,
-            "matrix_max": 1.0,
-            "matrix_step": 0.01,
+            "matrix_min": -2.0,
+            "matrix_max": 2.0,
+            "matrix_step": 0.025,
         },
     )
+
+
+@app.cell
+def _():
+    return
 
 
 if __name__ == "__main__":

@@ -12,3 +12,4 @@ When working on marimo notebooks in this repository:
 - Keep related concepts grouped together so the notebook remains easy to read.
 - Add concise docstrings to functions.
 - Optimize for readability first, then performance, then cleverness.
+- Use marimo check on the notebook

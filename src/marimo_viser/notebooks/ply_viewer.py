@@ -293,14 +293,6 @@ class GaussianSceneController:
             opacities=np.asarray(splat_data["opacities"], dtype=np.float32),
             covariances=covariances,
         )
-        remove_button = self.server.gui.add_button(
-            f"Remove {resolved_path.name} ({self.next_index - 1})"
-        )
-
-        @remove_button.on_click
-        def _(_: object) -> None:
-            splat_handle.remove()
-            remove_button.remove()
 
         return node_name
 
@@ -308,6 +300,21 @@ class GaussianSceneController:
 @app.cell
 def scene_controller():
     scene_server, scene_widget = viser_marimo(height=720)
+    fov_slider = scene_server.gui.add_slider(
+        "Field of view",
+        min=20.0,
+        max=120.0,
+        step=1.0,
+        initial_value=45.0,
+    )
+
+    @fov_slider.on_update
+    def _(_) -> None:
+        fov_radians = float(np.deg2rad(fov_slider.value))
+        scene_server.initial_camera.fov = fov_radians
+        for client in scene_server.get_clients().values():
+            client.camera.fov = fov_radians
+
     scene_controller = GaussianSceneController(scene_server)
     return scene_controller, scene_widget
 

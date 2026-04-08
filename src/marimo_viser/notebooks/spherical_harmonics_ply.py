@@ -807,6 +807,14 @@ def _(sh_server, sh_view_state, sh_viewer, sh_widget):
 
 
 @app.cell(column=1, hide_code=True)
+def _():
+    mo.md(r"""
+    ## GUI and Viewers
+    """)
+    return
+
+
+@app.cell(hide_code=True)
 def load_form():
     load_form = form_gui(
         LoadConfig,

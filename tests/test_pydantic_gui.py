@@ -132,6 +132,19 @@ def test_form_gui_returns_submit_gated_form(
     assert generated.validate({"title": "demo", "count": 4}) is None
 
 
+def test_form_gui_can_return_live_pydantic_gui(
+    notebook_mode: None,
+) -> None:
+    generated = form_gui(_RequiredModel, live_update=True)
+
+    assert isinstance(generated, PydanticGui)
+    assert "border: 1px solid #f2c94c" in generated.text
+    assert generated.value == _RequiredModel(title="", count=0)
+    assert (
+        generated.validate_frontend_value({"title": "demo", "count": 4}) is None
+    )
+
+
 def test_json_gui_returns_submit_gated_json_editor(
     notebook_mode: None,
 ) -> None:

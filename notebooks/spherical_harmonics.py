@@ -6,6 +6,8 @@ __generated_with = "0.22.5"
 app = marimo.App(width="columns")
 
 with app.setup:
+    from dataclasses import replace
+
     import marimo as mo
     import nerfview
     import numpy as np
@@ -158,7 +160,7 @@ def _():
 
 @app.cell
 def _(Config):
-    gui_widget = form_gui(Config, value=Config())
+    gui_widget = form_gui(Config, value=Config(), live_update=True)
     gui_widget
     return (gui_widget,)
 
@@ -172,8 +174,31 @@ def _(widget):
 @app.cell
 def _(gui_widget):
     config = gui_widget.value  # if gui_widget.value is not None else Config()
-    config
     return (config,)
+
+
+@app.cell
+def _(config):
+    config.sh_0.coefficients
+    return
+
+
+@app.cell
+def _(config):
+    config.sh_1.coefficients
+    return
+
+
+@app.cell
+def _(config):
+    config.sh_2.coefficients
+    return
+
+
+@app.cell
+def _(config):
+    config.sh_3.coefficients
+    return
 
 
 @app.cell
@@ -273,36 +298,41 @@ def render_spheres(
     degrees_to_use: int,
     orbit_radius: float,
     sphere_radius: float,
-    point_center: Float[Tensor, "3"],
-    axis_center: Float[Tensor, "3"],
     width: int,
     height: int,
 ) -> UInt8[Tensor, "height width 3"]:
-    """Render the point sphere and axis-preview sphere into one image."""
-    ray_dirs = camera_rays(c2w, K, width, height)
+    """Render split-screen spheres with a canonical view direction."""
+    left_width = width // 2
+    right_width = width - left_width
+    sphere_center = torch.zeros(3, dtype=torch.float32, device=c2w.device)
     ray_origin = orbit_position(c2w[:3, 3], orbit_radius)
-
-    t_point, hit_point = intersect_sphere(
-        ray_origin,
-        ray_dirs,
-        point_center,
-        sphere_radius,
-    )
-    t_axis, hit_axis = intersect_sphere(
-        ray_origin,
-        ray_dirs,
-        axis_center,
-        sphere_radius,
-    )
-
-    point_visible = hit_point & (t_point <= t_axis)
-    axis_visible = hit_axis & (t_axis < t_point)
     image = torch.zeros(
         (height, width, 3),
         dtype=torch.uint8,
         device=c2w.device,
     )
 
+    def split_intrinsics(
+        split_width: int,
+        split_K: Float[Tensor, "3 3"],
+    ) -> Float[Tensor, "3 3"]:
+        """Center the principal point for a split-screen sub-view."""
+        subview_K = split_K.clone()
+        subview_K[0, 2] = split_width * 0.5
+        return subview_K
+
+    left_ray_dirs = camera_rays(
+        c2w,
+        split_intrinsics(left_width, K),
+        left_width,
+        height,
+    )
+    left_t, left_hit = intersect_sphere(
+        ray_origin,
+        left_ray_dirs,
+        sphere_center,
+        sphere_radius,
+    )
     point_rgb = sh_to_rgb(
         spherical_harmonics(
             ray_origin[None, :],
@@ -310,22 +340,34 @@ def render_spheres(
             degrees_to_use,
         )
     )[0]
-    image = torch.where(point_visible[..., None], point_rgb, image)
-
-    axis_t = torch.where(axis_visible, t_axis, torch.zeros_like(t_axis))
-    axis_points = (
-        ray_origin[None, None, :]
-        + axis_t[..., None] * ray_dirs
-        - axis_center[None, None, :]
+    image[:, :left_width, :] = torch.where(
+        left_hit[..., None],
+        point_rgb,
+        image[:, :left_width, :],
     )
+
+    right_ray_dirs = camera_rays(
+        c2w,
+        split_intrinsics(right_width, K),
+        right_width,
+        height,
+    )
+    right_t, right_hit = intersect_sphere(
+        ray_origin,
+        right_ray_dirs,
+        sphere_center,
+        sphere_radius,
+    )
+    axis_t = torch.where(right_hit, right_t, torch.zeros_like(right_t))
+    axis_points = ray_origin[None, None, :] + axis_t[..., None] * right_ray_dirs
     axis_rgb = sh_to_rgb(
         spherical_harmonics(
-            axis_points.reshape(-1, 3),
+            axis_points[right_hit],
             coefficients,
             degrees_to_use,
-        ).reshape(height, width, 3)
+        )
     )
-    image = torch.where(axis_visible[..., None], axis_rgb, image)
+    image[:, left_width:, :][right_hit] = axis_rgb
     return image
 
 
@@ -365,12 +407,6 @@ def _(state):
             degrees_to_use,
             float(state["orbit_radius"]),
             float(state["sphere_radius"]),
-            torch.as_tensor(
-                state["point_center"], dtype=torch.float32, device=device
-            ),
-            torch.as_tensor(
-                state["axis_center"], dtype=torch.float32, device=device
-            ),
             width,
             height,
         )
@@ -386,8 +422,6 @@ def _():
         "degrees_to_use": 3,
         "orbit_radius": 6.0,
         "sphere_radius": 0.9,
-        "point_center": np.array([-1.2, 0.0, 0.0], dtype=np.float32),
-        "axis_center": np.array([1.2, 0.0, 0.0], dtype=np.float32),
     }
     return (state,)
 
@@ -401,13 +435,13 @@ def _(state):
         if norm < 1e-6:
             direction = np.array([1.0, 1.0, 0.6], dtype=np.float32)
             norm = float(np.linalg.norm(direction))
-        return direction / norm * state["orbit_radius"]
+        return direction / max(norm, 1e-6) * state["orbit_radius"]
 
     return (orbit_camera_position,)
 
 
 @app.cell
-def _(orbit_camera_position, server, state, viewer):
+def _(orbit_camera_position, server, state, viewer, widget):
     status_handle = server.gui.add_markdown(
         "**Background:** black  \n"
         "**Left sphere:** `point`  \n"
@@ -418,6 +452,7 @@ def _(orbit_camera_position, server, state, viewer):
     @server.on_client_connect
     def _(client: object) -> None:
         """Initialize and constrain each connected client camera."""
+        syncing_camera = False
         client.camera.look_at = np.array([0.0, 0.0, 0.0], dtype=np.float32)
         client.camera.position = np.array(
             [0.0, 0.0, state["orbit_radius"]],
@@ -425,12 +460,45 @@ def _(orbit_camera_position, server, state, viewer):
         )
 
         def _snap_camera() -> None:
-            """Reset the camera onto the fixed orbit around the origin."""
-            client.camera.look_at = np.array([0.0, 0.0, 0.0], dtype=np.float32)
-            client.camera.position = orbit_camera_position(
-                np.asarray(client.camera.position, dtype=np.float32)
-                - np.asarray(client.camera.look_at, dtype=np.float32)
+            """Reset translation to the canonical orbit and convert radius changes into FOV."""
+            nonlocal syncing_camera
+            if syncing_camera:
+                return
+            look_at = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+            relative_position = np.asarray(
+                client.camera.position, dtype=np.float32
+            ) - np.asarray(client.camera.look_at, dtype=np.float32)
+            distance = float(np.linalg.norm(relative_position))
+            safe_distance = max(distance, 1e-6)
+            zoomed_fov = 2.0 * np.arctan(
+                np.tan(float(client.camera.fov) * 0.5)
+                * safe_distance
+                / float(state["orbit_radius"])
             )
+            zoomed_fov = float(
+                np.clip(zoomed_fov, np.deg2rad(5.0), np.deg2rad(175.0))
+            )
+            client_id = getattr(
+                client, "client_id", getattr(client, "id", None)
+            )
+            camera_state = widget.get_camera_state(client_id=client_id)
+            syncing_camera = True
+            try:
+                widget.set_camera_state(
+                    replace(
+                        camera_state,
+                        position=orbit_camera_position(
+                            relative_position
+                        ).astype(np.float64),
+                        look_at=look_at.astype(np.float64),
+                        fov=zoomed_fov,
+                    ),
+                    client_id=client_id,
+                    update_reset_view=True,
+                    sync_gui=True,
+                )
+            finally:
+                syncing_camera = False
 
         _snap_camera()
 
@@ -492,7 +560,7 @@ def _():
 
 
 @app.cell
-def _(SH0, SH1, SH2, SH3):
+def _():
     class Config(BaseModel):
         """Configuration for the SH sphere demo."""
 
@@ -511,88 +579,76 @@ def _(SH0, SH1, SH2, SH3):
     return (Config,)
 
 
-@app.cell
-def _():
-    class SH0(BaseModel):
-        """Degree-0 SH coefficients."""
-
-        coefficients: PyArray[Float, float, "1 3"] = Field(
-            default_factory=lambda: default_coefficients(1),
-            description=(
-                "Degree-0 RGB coefficient block. With the current display "
-                "mapping `clip(sh + 0.5, 0, 1)`, zero gives neutral gray. "
-                "For a pure red appearance, raising only red is not enough; "
-                "you also need to suppress green and blue, e.g. "
-                "`[0.5, -0.5, -0.5]`."
-            ),
-            json_schema_extra={
-                "matrix_min": -1.0,
-                "matrix_max": 1.0,
-                "matrix_step": 0.01,
-            },
-        )
-
-    return (SH0,)
-
-
-@app.cell
-def _():
-    class SH1(BaseModel):
-        """Degree-1 SH coefficients."""
-
-        coefficients: PyArray[Float, float, "3 3"] = Field(
-            default_factory=lambda: default_coefficients(3),
-            description="Degree-1 RGB coefficient block.",
-            json_schema_extra={
-                "matrix_min": -1.0,
-                "matrix_max": 1.0,
-                "matrix_step": 0.01,
-            },
-        )
-
-    return (SH1,)
-
-
-@app.cell
-def _():
-    class SH2(BaseModel):
-        """Degree-2 SH coefficients."""
-
-        coefficients: PyArray[Float, float, "5 3"] = Field(
-            default_factory=lambda: default_coefficients(5),
-            description="Degree-2 RGB coefficient block.",
-            json_schema_extra={
-                "matrix_min": -1.0,
-                "matrix_max": 1.0,
-                "matrix_step": 0.01,
-            },
-        )
-
-    return (SH2,)
-
-
-@app.cell
-def _():
-    class SH3(BaseModel):
-        """Degree-3 SH coefficients."""
-
-        coefficients: PyArray[Float, float, "7 3"] = Field(
-            default_factory=lambda: default_coefficients(7),
-            description="Degree-3 RGB coefficient block.",
-            json_schema_extra={
-                "matrix_min": -1.0,
-                "matrix_max": 1.0,
-                "matrix_step": 0.01,
-            },
-        )
-
-    return (SH3,)
-
-
 @app.function
 def default_coefficients(rows: int) -> np.ndarray:
     """Create zero SH coefficients for a neutral gray sphere."""
     return np.zeros((rows, 3), dtype=np.float32)
+
+
+@app.class_definition
+class SH0(BaseModel):
+    """Degree-0 SH coefficients."""
+
+    coefficients: PyArray[Float, float, "1 3"] = Field(
+        default_factory=lambda: default_coefficients(1),
+        description=(
+            "Degree-0 RGB coefficient block. With the current display "
+            "mapping `clip(sh + 0.5, 0, 1)`, zero gives neutral gray. "
+            "For a pure red appearance, raising only red is not enough; "
+            "you also need to suppress green and blue, e.g. "
+            "`[0.5, -0.5, -0.5]`."
+        ),
+        json_schema_extra={
+            "matrix_min": -1.0,
+            "matrix_max": 1.0,
+            "matrix_step": 0.01,
+        },
+    )
+
+
+@app.class_definition
+class SH1(BaseModel):
+    """Degree-1 SH coefficients."""
+
+    coefficients: PyArray[Float, float, "3 3"] = Field(
+        default_factory=lambda: default_coefficients(3),
+        description="Degree-1 RGB coefficient block.",
+        json_schema_extra={
+            "matrix_min": -1.0,
+            "matrix_max": 1.0,
+            "matrix_step": 0.01,
+        },
+    )
+
+
+@app.class_definition
+class SH2(BaseModel):
+    """Degree-2 SH coefficients."""
+
+    coefficients: PyArray[Float, float, "5 3"] = Field(
+        default_factory=lambda: default_coefficients(5),
+        description="Degree-2 RGB coefficient block.",
+        json_schema_extra={
+            "matrix_min": -1.0,
+            "matrix_max": 1.0,
+            "matrix_step": 0.01,
+        },
+    )
+
+
+@app.class_definition
+class SH3(BaseModel):
+    """Degree-3 SH coefficients."""
+
+    coefficients: PyArray[Float, float, "7 3"] = Field(
+        default_factory=lambda: default_coefficients(7),
+        description="Degree-3 RGB coefficient block.",
+        json_schema_extra={
+            "matrix_min": -1.0,
+            "matrix_max": 1.0,
+            "matrix_step": 0.01,
+        },
+    )
 
 
 @app.class_definition

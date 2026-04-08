@@ -123,11 +123,13 @@ class PydanticGui(
         value: ModelT | dict[str, Any] | None = None,
         label: str = "",
         include_json_editor: bool = True,
+        bordered: bool = False,
         on_change: Any | None = None,
     ) -> None:
         self._model_cls = model_cls
         self._label = label
         self._include_json_editor = include_json_editor
+        self._bordered = bordered
         self._last_active_tab = _FORM_TAB if include_json_editor else ""
         self._last_json_error: str | None = None
         self._last_payload = _resolve_initial_payload(model_cls, value)
@@ -168,6 +170,10 @@ class PydanticGui(
             self._tabs = tabs
             layout = tabs
 
+        slotted_html = layout.text
+        if bordered:
+            slotted_html = _wrap_live_update_layout(slotted_html)
+
         self._elements = elements
         super().__init__(
             component_name=self._name,
@@ -182,7 +188,7 @@ class PydanticGui(
                     for name, element in self._elements.items()
                 }
             },
-            slotted_html=layout.text,
+            slotted_html=slotted_html,
             on_change=on_change,
         )
         for name, element in self._elements.items():
@@ -199,6 +205,7 @@ class PydanticGui(
             value=self._last_payload,
             label=self._label,
             include_json_editor=self._include_json_editor,
+            bordered=self._bordered,
             on_change=self._on_change,
         )
 
@@ -686,8 +693,9 @@ def form_gui(
     value: ModelT | dict[str, Any] | None = None,
     label: str = "",
     submit_label: str = "Submit",
+    live_update: bool = False,
 ) -> Any:
-    """Create a submit-gated marimo UI from a Pydantic model.
+    """Create a marimo UI from a Pydantic model.
 
     Outside marimo notebook runtime, this falls back to ``tyro.cli(model_cls)`` and
     returns a wrapper whose ``.value`` contains the parsed model.
@@ -698,6 +706,15 @@ def form_gui(
     NOTE: since we are using pydantic we only support serializable models by default. If you do
           want to use small arrays you can use ``from py_jaxtyping import PyArray`` and define
           your model with ``PyArray[Float, float, "N"]`` instead of ``ndarray``.
+
+    Args:
+        model_cls: Pydantic model type to render.
+        value: Optional initial model value or payload.
+        label: Optional top-level label.
+        submit_label: Button label used when ``live_update`` is ``False``.
+        live_update: When ``False`` (default), wrap the GUI in marimo's submit
+            form. When ``True``, return the live ``PydanticGui`` directly so
+            edits update immediately.
     """
     if not mo.running_in_notebook():
         default = _resolve_cli_default(model_cls, value)
@@ -708,7 +725,10 @@ def form_gui(
         value=value,
         label=label,
         include_json_editor=False,
+        bordered=live_update,
     )
+    if live_update:
+        return model_gui
     form = model_gui.form(
         label=label,
         submit_button_label=submit_label,
@@ -807,6 +827,20 @@ def _resolve_cli_default(
     if isinstance(value, model_cls):
         return value
     return model_cls.model_validate(value)
+
+
+def _wrap_live_update_layout(slotted_html: str) -> str:
+    """Wrap a live-updating form in a bordered yellow container."""
+    return (
+        '<div style="'
+        "border: 1px solid #f2c94c; "
+        "background: rgba(242, 201, 76, 0.12); "
+        "border-radius: 8px; "
+        "padding: 0.75rem; "
+        '">'
+        f"{slotted_html}"
+        "</div>"
+    )
 
 
 def _build_model_json_gui(

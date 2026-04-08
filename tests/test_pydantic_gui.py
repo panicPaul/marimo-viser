@@ -33,6 +33,11 @@ class _OuterModel(BaseModel):
     inner: _InnerModel = _InnerModel()
 
 
+class _TwoTabOuterModel(BaseModel):
+    left: _InnerModel = _InnerModel()
+    right: _InnerModel = _InnerModel()
+
+
 class _ArrayModel(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -357,4 +362,20 @@ def test_partial_nested_updates_do_not_require_full_frontend_payload() -> None:
     assert generated.value == _OuterModel(
         title="viewer",
         inner=_InnerModel(enabled=True, threshold=0.8),
+    )
+
+
+def test_inactive_nested_tabs_keep_live_state_on_submit() -> None:
+    generated = PydanticGui(_TwoTabOuterModel, include_json_editor=False)
+    left = generated.elements["left"]
+
+    assert isinstance(left, PydanticGui)
+
+    pgui._set_local_frontend_value(left.elements["threshold"], 0.8)
+
+    generated._update({"right": {"enabled": False}})
+
+    assert generated.value == _TwoTabOuterModel(
+        left=_InnerModel(enabled=True, threshold=0.8),
+        right=_InnerModel(enabled=False, threshold=0.5),
     )

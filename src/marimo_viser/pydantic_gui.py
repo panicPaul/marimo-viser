@@ -261,7 +261,7 @@ class PydanticGui(
             spec = self._field_specs[name]
             frontend_value = value.get(
                 name,
-                self._field_elements[name]._value_frontend,
+                _current_element_frontend_value(self._field_elements[name]),
             )
             payload[name] = spec.parse_frontend_value(
                 self._field_elements[name],
@@ -281,7 +281,7 @@ class PydanticGui(
     def _current_frontend_value(self) -> dict[str, JSONType]:
         current: dict[str, JSONType] = {}
         for name, element in self._elements.items():
-            current[name] = element._value_frontend
+            current[name] = _current_element_frontend_value(element)
         return current
 
     def _apply_non_field_partials(self, value: dict[str, JSONType]) -> None:
@@ -632,7 +632,10 @@ class PydanticJsonGui(UIElement[Any, ModelT | None], Generic[ModelT]):
                 continue
             element = self._elements[name]
             assert isinstance(element, PydanticJsonGui)
-            frontend_value = value.get(name, element._value_frontend)
+            frontend_value = value.get(
+                name,
+                _current_element_frontend_value(element),
+            )
             if element._composite_mode:
                 if not isinstance(frontend_value, dict):
                     return {}, f"{name}: Expected an object."
@@ -660,9 +663,13 @@ class PydanticJsonGui(UIElement[Any, ModelT | None], Generic[ModelT]):
     def _current_frontend_value(self) -> dict[str, JSONType]:
         if not self._composite_mode:
             assert self._editor is not None
-            return {_DIRECT_JSON_EDITOR_KEY: self._editor._value_frontend}
+            return {
+                _DIRECT_JSON_EDITOR_KEY: _current_element_frontend_value(
+                    self._editor
+                )
+            }
         return {
-            name: element._value_frontend
+            name: _current_element_frontend_value(element)
             for name, element in self._elements.items()
         }
 
@@ -687,6 +694,10 @@ def form_gui(
 
     For this script workflow to behave predictably, a notebook should only define
     one GUI entrypoint.
+
+    NOTE: since we are using pydantic we only support serializable models by default. If you do
+          want to use small arrays you can use ``from py_jaxtyping import PyArray`` and define
+          your model with ``PyArray[Float, float, "N"]`` instead of ``ndarray``.
     """
     if not mo.running_in_notebook():
         default = _resolve_cli_default(model_cls, value)
@@ -722,6 +733,10 @@ def json_gui(
 
     For this script workflow to behave predictably, a notebook should only define
     one GUI entrypoint.
+
+    NOTE: since we are using pydantic we only support serializable models by default. If you do
+          want to use small arrays you can use ``from py_jaxtyping import PyArray`` and define
+          your model with ``PyArray[Float, float, "N"]`` instead of ``ndarray``.
     """
     if not mo.running_in_notebook():
         default = _resolve_cli_default(model_cls, value)
@@ -914,7 +929,7 @@ def _build_field_element(
         )
 
     if _is_array_annotation(annotation):
-        return _build_array_element(annotation, value, label)
+        return _build_array_element(annotation, spec.info, value, label)
 
     return mo.ui.text(value=_text_value(value), label=label)
 
@@ -964,6 +979,7 @@ def _build_numeric_element(
 
 def _build_array_element(
     annotation: Any,
+    info: FieldInfo,
     value: Any,
     label: str,
 ) -> UIElement[Any, Any]:
@@ -974,7 +990,15 @@ def _build_array_element(
             f"Array field {label!r} has {total_cells} cells, which exceeds the "
             f"supported limit of {_MAX_MATRIX_CELLS}."
         )
-    return mo.ui.matrix(value=matrix_value, label=label)
+    min_value, max_value, step = _array_widget_bounds(info, matrix_value)
+
+    return mo.ui.matrix(
+        value=matrix_value,
+        min_value=min_value,
+        max_value=max_value,
+        step=step,
+        label=label,
+    )
 
 
 def _with_help_text(
@@ -1128,6 +1152,54 @@ def _infer_numeric_step(
     if annotation is int:
         return max(1, 10**exponent)
     return 10.0**exponent
+
+
+def _array_widget_bounds(
+    info: FieldInfo,
+    matrix_value: Any,
+) -> tuple[int | float | None, int | float | None, int | float]:
+    extras = info.json_schema_extra or {}
+    if not isinstance(extras, dict):
+        extras = {}
+
+    min_value = extras.get("matrix_min")
+    max_value = extras.get("matrix_max")
+    step = extras.get("matrix_step")
+
+    if min_value is not None or max_value is not None or step is not None:
+        return min_value, max_value, step if step is not None else 1.0
+
+    bounds = _numeric_bounds(info)
+    resolved_min: int | float | None = None
+    resolved_max: int | float | None = None
+
+    if bounds.lower is not None:
+        resolved_min = bounds.lower
+        if bounds.strict_lower:
+            resolved_min += (
+                bounds.step
+                if bounds.step is not None
+                else 1
+                if np.asarray(matrix_value).dtype.kind in {"i", "u"}
+                else 0.1
+            )
+
+    if bounds.upper is not None:
+        resolved_max = bounds.upper
+        if bounds.strict_upper:
+            resolved_max -= (
+                bounds.step
+                if bounds.step is not None
+                else 1
+                if np.asarray(matrix_value).dtype.kind in {"i", "u"}
+                else 0.1
+            )
+
+    return (
+        resolved_min,
+        resolved_max,
+        (bounds.step if bounds.step is not None else 1.0),
+    )
 
 
 def _tyro_help_text_for_field(
@@ -1314,6 +1386,14 @@ def _set_local_frontend_value(
         pass
 
 
+def _current_element_frontend_value(element: UIElement[Any, Any]) -> JSONType:
+    if isinstance(element, PydanticGui):
+        return element._current_frontend_value()
+    if isinstance(element, PydanticJsonGui):
+        return element._current_frontend_value()
+    return element._value_frontend
+
+
 def _merge_json_value(current: Any, incoming: Any) -> Any:
     if isinstance(current, dict) and isinstance(incoming, dict):
         merged = dict(current)
@@ -1430,11 +1510,7 @@ def _coerce_array_value(
         and annotation.array_type is torch.Tensor
     ):
         dtype = torch.float32 if array.dtype.kind == "f" else torch.int64
-        if array.ndim == 2 and array.shape[1] == 1:
-            array = array[:, 0]
         return torch.tensor(array.tolist(), dtype=dtype)
-    if array.ndim == 2 and array.shape[1] == 1:
-        array = array[:, 0]
     return np.asarray(array)
 
 

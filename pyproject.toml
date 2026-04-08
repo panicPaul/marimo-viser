@@ -17,6 +17,7 @@ dependencies = [
     "numpy>=2.4.4",
     "opencv-python>=4.13.0.92", # for faster jpeg encoding needed in viser
     "pre-commit>=4.5.1",
+    "py-jaxtyping>=0.1.5",
     "pydantic>=2.12.5",
     "pytest>=9.0.2",
     "ruff>=0.15.9",

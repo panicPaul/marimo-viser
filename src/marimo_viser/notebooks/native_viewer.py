@@ -32,9 +32,10 @@ def _():
 def _(viewer_render_fn, viewer_state):
     viewer = native_viewer(
         viewer_render_fn,
-        interactive_quality=100,
-        interactive_scale=0.9,
+        interactive_quality=50,
+        interactive_scale=0.8,
         state=viewer_state,
+        # settled_quality='png'
     )
     viewer
     return (viewer,)

@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
+import secrets
+import socket
 import threading
 import time
 import traceback
@@ -17,6 +20,7 @@ import cv2
 import numpy as np
 import torch
 import traitlets
+import uvicorn
 from jaxtyping import Float, UInt8
 from marimo._plugins.ui._core.ui_element import UIElement
 from marimo._plugins.ui._impl.comm import MarimoComm
@@ -32,9 +36,197 @@ from marimo._plugins.ui._impl.from_anywidget import (
 from marimo._runtime.virtual_file import VirtualFile
 from marimo._utils.code import hash_code
 from PIL import Image
+from starlette.applications import Starlette
+from starlette.routing import WebSocketRoute
+from starlette.websockets import WebSocket, WebSocketDisconnect
 
 CameraConvention = Literal["opencv", "opengl", "blender", "colmap"]
 _ASSET_DIR = Path(__file__).with_name("assets")
+
+
+def _find_free_port(start: int = 8765, attempts: int = 64) -> int:
+    """Return the first free TCP port in [start, start + attempts)."""
+    for port in range(start, start + attempts):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind(("", port))
+                return port
+            except OSError:
+                continue
+    raise RuntimeError(
+        f"Could not find a free port in range {start}-{start + attempts}."
+    )
+
+
+@dataclass
+class _FrameStreamState:
+    """Mutable per-viewer stream state for the local websocket server."""
+
+    token: str
+    latest_packet: bytes | None = None
+    clients: set[WebSocket] | None = None
+
+    def __post_init__(self) -> None:
+        if self.clients is None:
+            self.clients = set()
+
+
+class _FrameStreamServer:
+    """Local websocket server for native viewer frame streaming."""
+
+    def __init__(self) -> None:
+        self.port = _find_free_port()
+        self._streams: dict[str, _FrameStreamState] = {}
+        self._lock = threading.Lock()
+        self._ready = threading.Event()
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._app = Starlette(
+            routes=[
+                WebSocketRoute("/streams/{stream_id}", self._websocket_endpoint)
+            ]
+        )
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        if not self._ready.wait(timeout=5.0):
+            raise RuntimeError(
+                "Timed out starting native viewer stream server."
+            )
+
+    def _run(self) -> None:
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+        self._ready.set()
+        config = uvicorn.Config(
+            self._app,
+            host="0.0.0.0",
+            port=self.port,
+            log_level="warning",
+        )
+        server = uvicorn.Server(config)
+        self._loop.run_until_complete(server.serve())
+
+    async def _websocket_endpoint(self, websocket: WebSocket) -> None:
+        stream_id = str(websocket.path_params["stream_id"])
+        token = websocket.query_params.get("token", "")
+        with self._lock:
+            stream_state = self._streams.get(stream_id)
+            is_authorized = stream_state is not None and secrets.compare_digest(
+                token, stream_state.token
+            )
+        if not is_authorized:
+            await websocket.close(code=1008)
+            return
+
+        await websocket.accept()
+        assert stream_state is not None
+        with self._lock:
+            stream_state.clients.add(websocket)
+            latest_packet = stream_state.latest_packet
+        if latest_packet is not None:
+            await websocket.send_bytes(latest_packet)
+
+        try:
+            while True:
+                message = await websocket.receive()
+                if message["type"] == "websocket.disconnect":
+                    break
+                if message["type"] != "websocket.receive":
+                    continue
+                if "text" not in message or message["text"] is None:
+                    continue
+                try:
+                    payload = json.loads(message["text"])
+                except json.JSONDecodeError:
+                    continue
+                if payload.get("type") != "clock_sync_ping":
+                    continue
+                ping_id = payload.get("ping_id")
+                client_sent_at_ms = payload.get("client_sent_at_ms")
+                if not isinstance(ping_id, int | float) or not isinstance(
+                    client_sent_at_ms, int | float
+                ):
+                    continue
+                await websocket.send_json(
+                    {
+                        "type": "clock_sync_pong",
+                        "ping_id": int(ping_id),
+                        "client_sent_at_ms": float(client_sent_at_ms),
+                        "server_received_at_ms": (time.perf_counter() * 1000.0),
+                    }
+                )
+        except WebSocketDisconnect:
+            pass
+        finally:
+            with self._lock:
+                active_stream = self._streams.get(stream_id)
+                if active_stream is not None:
+                    active_stream.clients.discard(websocket)
+
+    def register_stream(self) -> tuple[str, str]:
+        """Create a new stream and return `(stream_id, token)`."""
+        stream_id = secrets.token_urlsafe(12)
+        token = secrets.token_urlsafe(24)
+        with self._lock:
+            self._streams[stream_id] = _FrameStreamState(token=token)
+        return stream_id, token
+
+    def publish(
+        self, stream_id: str, packet: bytes, *, scheduled_at: float
+    ) -> concurrent.futures.Future[dict[str, float]] | None:
+        """Publish a packet to a stream and fan it out to connected clients."""
+        with self._lock:
+            stream_state = self._streams[stream_id]
+            stream_state.latest_packet = packet
+        if self._loop is None:
+            return None
+        return asyncio.run_coroutine_threadsafe(
+            self._broadcast(stream_id, packet, scheduled_at), self._loop
+        )
+
+    async def _broadcast(
+        self, stream_id: str, packet: bytes, scheduled_at: float
+    ) -> dict[str, float]:
+        started_at = time.perf_counter()
+        with self._lock:
+            stream_state = self._streams.get(stream_id)
+            clients = [] if stream_state is None else list(stream_state.clients)
+        stale_clients: list[WebSocket] = []
+        for websocket in clients:
+            try:
+                await websocket.send_bytes(packet)
+            except Exception:
+                stale_clients.append(websocket)
+        if stale_clients:
+            with self._lock:
+                stream_state = self._streams.get(stream_id)
+                if stream_state is not None:
+                    for websocket in stale_clients:
+                        stream_state.clients.discard(websocket)
+        finished_at = time.perf_counter()
+        return {
+            "stream_queue_time_ms": (started_at - scheduled_at) * 1000.0,
+            "stream_send_time_ms": (finished_at - started_at) * 1000.0,
+        }
+
+
+_FRAME_STREAM_SERVER: _FrameStreamServer | None = None
+_FRAME_STREAM_SERVER_LOCK = threading.Lock()
+
+
+def _get_frame_stream_server() -> _FrameStreamServer:
+    """Return the shared local websocket frame stream server."""
+    global _FRAME_STREAM_SERVER
+    with _FRAME_STREAM_SERVER_LOCK:
+        if _FRAME_STREAM_SERVER is None:
+            _FRAME_STREAM_SERVER = _FrameStreamServer()
+        return _FRAME_STREAM_SERVER
+
+
+def _pack_frame_packet(metadata: dict[str, object], payload: bytes) -> bytes:
+    """Pack frame metadata and payload into a binary websocket packet."""
+    header = json.dumps(metadata, separators=(",", ":")).encode("utf-8")
+    return len(header).to_bytes(4, "big") + header + payload
 
 
 _CONVENTION_TO_INTERNAL_ROTATION: dict[CameraConvention, np.ndarray] = {
@@ -283,6 +475,26 @@ class ViewerClick:
         )
 
 
+@dataclass
+class NativeViewerState:
+    """Explicit persistent state for a native viewer session.
+
+    Reuse the same state object across reruns to preserve the current camera
+    state and last click even when `render_fn` is recreated.
+    """
+
+    camera_state: CameraState
+    last_click: ViewerClick | None = None
+
+    def __init__(
+        self,
+        camera_state: CameraState | None = None,
+        last_click: ViewerClick | None = None,
+    ) -> None:
+        self.camera_state = camera_state or CameraState.default()
+        self.last_click = last_click
+
+
 def _normalize_frame(
     frame: np.ndarray | torch.Tensor,
 ) -> UInt8[np.ndarray, "height width 3"]:
@@ -461,6 +673,7 @@ class _LatestOnlyRenderer:
         self._pending_revision = -1
         self._pending_state: CameraState | None = None
         self._pending_interaction_active = False
+        self._pending_requested_at = 0.0
         self._worker = threading.Thread(target=self._run, daemon=True)
         self._worker.start()
 
@@ -473,6 +686,7 @@ class _LatestOnlyRenderer:
             self._pending_revision = revision
             self._pending_state = camera_state
             self._pending_interaction_active = interaction_active
+            self._pending_requested_at = time.perf_counter()
             self._set_rendering(True)
             self._condition.notify()
 
@@ -484,11 +698,15 @@ class _LatestOnlyRenderer:
                 revision = self._pending_revision
                 camera_state = self._pending_state
                 interaction_active = self._pending_interaction_active
+                requested_at = self._pending_requested_at
                 self._pending_state = None
 
             assert camera_state is not None
             try:
                 render_started_at = time.perf_counter()
+                render_queue_time_ms = (
+                    render_started_at - requested_at
+                ) * 1000.0
                 rendered_frame = self._render_fn(camera_state)
                 render_time_ms = (
                     time.perf_counter() - render_started_at
@@ -520,6 +738,7 @@ class _LatestOnlyRenderer:
                     revision,
                     camera_state,
                     frame,
+                    render_queue_time_ms,
                     render_time_ms,
                     interaction_active,
                 )
@@ -543,8 +762,25 @@ class _NativeViewerAnyWidget(anywidget.AnyWidget):
 
     camera_state_json = traitlets.Unicode("").tag(sync=True)
     aspect_ratio = traitlets.Float(16.3 / 9.0).tag(sync=True)
+    stream_port = traitlets.Int(0).tag(sync=True)
+    stream_path = traitlets.Unicode("").tag(sync=True)
+    stream_token = traitlets.Unicode("").tag(sync=True)
     _camera_revision = traitlets.Int(0).tag(sync=True)
     interaction_active = traitlets.Bool(False).tag(sync=True)
+    latency_ms = traitlets.Float(0.0).tag(sync=True)
+    latency_sample_ms = traitlets.Float(0.0).tag(sync=True)
+    render_time_ms = traitlets.Float(0.0).tag(sync=True)
+    render_queue_time_ms = traitlets.Float(0.0).tag(sync=True)
+    encode_time_ms = traitlets.Float(0.0).tag(sync=True)
+    stream_queue_time_ms = traitlets.Float(0.0).tag(sync=True)
+    stream_send_time_ms = traitlets.Float(0.0).tag(sync=True)
+    backend_to_browser_time_ms = traitlets.Float(0.0).tag(sync=True)
+    packet_size_bytes = traitlets.Int(0).tag(sync=True)
+    browser_receive_queue_ms = traitlets.Float(0.0).tag(sync=True)
+    browser_post_receive_ms = traitlets.Float(0.0).tag(sync=True)
+    browser_decode_time_ms = traitlets.Float(0.0).tag(sync=True)
+    browser_draw_time_ms = traitlets.Float(0.0).tag(sync=True)
+    browser_present_wait_ms = traitlets.Float(0.0).tag(sync=True)
     last_click_json = traitlets.Unicode("").tag(sync=True)
     is_rendering = traitlets.Bool(False).tag(sync=True)
     error_text = traitlets.Unicode("").tag(sync=True)
@@ -559,10 +795,16 @@ class _NativeViewerAnyWidget(anywidget.AnyWidget):
         *,
         camera_state: CameraState,
         aspect_ratio: float,
+        stream_port: int,
+        stream_path: str,
+        stream_token: str,
     ) -> None:
         super().__init__(
             camera_state_json=camera_state.to_json(),
             aspect_ratio=aspect_ratio,
+            stream_port=stream_port,
+            stream_path=stream_path,
+            stream_token=stream_token,
         )
 
 
@@ -574,10 +816,16 @@ class NativeViewerWidget(_StableMarimoAnyWidget):
         anywidget_instance: _NativeViewerAnyWidget,
         render_fn: Callable[[CameraState], np.ndarray | torch.Tensor],
         interactive_quality: int,
+        state: NativeViewerState | None,
     ) -> None:
         super().__init__(anywidget_instance)
         self._latest_frame_array: np.ndarray | None = None
         self._interactive_quality = interactive_quality
+        self._state = state
+        self._stream_server = _get_frame_stream_server()
+        self._stream_path = anywidget_instance.stream_path
+        self._last_debug_sample_at: float | None = None
+        self._smoothed_debug_metrics: dict[str, float] = {}
         try:
             self._main_loop: asyncio.AbstractEventLoop | None = (
                 asyncio.get_running_loop()
@@ -593,7 +841,33 @@ class NativeViewerWidget(_StableMarimoAnyWidget):
         self.widget.observe(
             self._on_camera_revision_change, names=["_camera_revision"]
         )
+        self.widget.observe(
+            self._on_camera_state_json_change, names=["camera_state_json"]
+        )
+        self.widget.observe(
+            self._on_last_click_json_change, names=["last_click_json"]
+        )
         self.rerender()
+
+    def _update_smoothed_debug_metrics(
+        self, **samples: float
+    ) -> dict[str, float]:
+        """Update smoothed backend timing metrics with idle reset."""
+        now = time.perf_counter()
+        should_reset = (
+            self._last_debug_sample_at is None
+            or now - self._last_debug_sample_at > 1.0
+        )
+        for key, sample in samples.items():
+            previous = self._smoothed_debug_metrics.get(key)
+            if should_reset or previous is None:
+                self._smoothed_debug_metrics[key] = sample
+            else:
+                self._smoothed_debug_metrics[key] = (
+                    previous * 0.85 + sample * 0.15
+                )
+        self._last_debug_sample_at = now
+        return {key: self._smoothed_debug_metrics[key] for key in samples}
 
     def anywidget(self) -> _NativeViewerAnyWidget:
         """Return the underlying raw anywidget instance."""
@@ -604,26 +878,98 @@ class NativeViewerWidget(_StableMarimoAnyWidget):
         """Return a live mapping of synced widget traits."""
         return _WidgetValueProxy(self.widget)
 
-    @property
-    def camera_state(self) -> CameraState:
+    def get_camera_state(self) -> CameraState:
         """Return the current synced camera state."""
         return CameraState.from_json(self.widget.camera_state_json)
 
-    @property
-    def last_click(self) -> ViewerClick | None:
+    def get_last_click(self) -> ViewerClick | None:
         """Return the last primary-button click, if any."""
         value = self.widget.last_click_json
         if not value:
             return None
         return ViewerClick.from_json(value)
 
-    def get_camera_state(self) -> CameraState:
-        """Return the current synced camera state."""
-        return self.camera_state
+    def get_debug_info(self) -> dict[str, float | str]:
+        """Return the current synced timing diagnostics.
 
-    def get_last_click(self) -> ViewerClick | None:
-        """Return the last primary-button click, if any."""
-        return self.last_click
+        The returned dictionary includes raw synced metrics such as
+        `latency_ms`, `latency_sample_ms`, encoder and stream timings, and
+        browser-side timings.
+
+        It also includes two derived accounting views:
+
+        - `leaf`: sums the non-overlapping leaf stages
+          (`render_queue`, `render`, `encode`, `stream_queue`,
+          `stream_send`, `browser_receive_queue`,
+          `browser_decode`, `browser_draw`, `browser_present_wait`).
+        - `coarse`: uses the coarser browser bucket
+          `browser_post_receive_ms` instead of the decode/draw/present
+          leaf stages.
+
+        The `unaccounted_*` fields are residuals against either the
+        smoothed average latency (`latency_ms`) or the raw per-frame
+        latency sample (`latency_sample_ms`).
+        """
+        debug_info: dict[str, float | str] = {
+            "error_text": str(self.widget.error_text),
+            "latency_ms": float(self.widget.latency_ms),
+            "latency_sample_ms": float(self.widget.latency_sample_ms),
+            "render_time_ms": float(self.widget.render_time_ms),
+            "render_queue_time_ms": float(self.widget.render_queue_time_ms),
+            "encode_time_ms": float(self.widget.encode_time_ms),
+            "stream_queue_time_ms": float(self.widget.stream_queue_time_ms),
+            "stream_send_time_ms": float(self.widget.stream_send_time_ms),
+            "backend_to_browser_time_ms": float(
+                self.widget.backend_to_browser_time_ms
+            ),
+            "packet_size_bytes": int(self.widget.packet_size_bytes),
+            "browser_receive_queue_ms": float(
+                self.widget.browser_receive_queue_ms
+            ),
+            "browser_post_receive_ms": float(
+                self.widget.browser_post_receive_ms
+            ),
+            "browser_decode_time_ms": float(self.widget.browser_decode_time_ms),
+            "browser_draw_time_ms": float(self.widget.browser_draw_time_ms),
+            "browser_present_wait_ms": float(
+                self.widget.browser_present_wait_ms
+            ),
+        }
+        accounted_leaf_latency_ms = (
+            float(debug_info["render_queue_time_ms"])
+            + float(debug_info["render_time_ms"])
+            + float(debug_info["encode_time_ms"])
+            + float(debug_info["stream_queue_time_ms"])
+            + float(debug_info["stream_send_time_ms"])
+            + float(debug_info["browser_receive_queue_ms"])
+            + float(debug_info["browser_decode_time_ms"])
+            + float(debug_info["browser_draw_time_ms"])
+            + float(debug_info["browser_present_wait_ms"])
+        )
+        accounted_coarse_latency_ms = (
+            float(debug_info["render_queue_time_ms"])
+            + float(debug_info["render_time_ms"])
+            + float(debug_info["encode_time_ms"])
+            + float(debug_info["stream_queue_time_ms"])
+            + float(debug_info["stream_send_time_ms"])
+            + float(debug_info["browser_receive_queue_ms"])
+            + float(debug_info["browser_post_receive_ms"])
+        )
+        debug_info["accounted_leaf_latency_ms"] = accounted_leaf_latency_ms
+        debug_info["unaccounted_leaf_latency_ms"] = (
+            float(debug_info["latency_ms"]) - accounted_leaf_latency_ms
+        )
+        debug_info["unaccounted_leaf_latency_sample_ms"] = (
+            float(debug_info["latency_sample_ms"]) - accounted_leaf_latency_ms
+        )
+        debug_info["accounted_coarse_latency_ms"] = accounted_coarse_latency_ms
+        debug_info["unaccounted_coarse_latency_ms"] = (
+            float(debug_info["latency_ms"]) - accounted_coarse_latency_ms
+        )
+        debug_info["unaccounted_coarse_latency_sample_ms"] = (
+            float(debug_info["latency_sample_ms"]) - accounted_coarse_latency_ms
+        )
+        return debug_info
 
     def get_snapshot(self) -> Image.Image:
         """Return the latest rendered frame as a PIL image."""
@@ -637,6 +983,21 @@ class NativeViewerWidget(_StableMarimoAnyWidget):
             self._main_loop.call_soon_threadsafe(callback)
             return
         callback()
+
+    def _on_camera_state_json_change(self, change: dict[str, object]) -> None:
+        """Persist the current camera state into the shared state object."""
+        new_value = change.get("new")
+        if isinstance(new_value, str) and self._state is not None:
+            self._state.camera_state = CameraState.from_json(new_value)
+
+    def _on_last_click_json_change(self, change: dict[str, object]) -> None:
+        """Persist the last click into the shared state object."""
+        new_value = change.get("new")
+        if not isinstance(new_value, str) or self._state is None:
+            return
+        self._state.last_click = (
+            None if not new_value else ViewerClick.from_json(new_value)
+        )
 
     def set_camera_state(self, camera_state: CameraState) -> None:
         """Apply a camera state and request a fresh render."""
@@ -662,10 +1023,12 @@ class NativeViewerWidget(_StableMarimoAnyWidget):
         revision: int,
         camera_state: CameraState,
         frame: np.ndarray,
+        render_queue_time_ms: float,
         render_time_ms: float,
         interaction_active: bool,
     ) -> None:
         jpeg_quality = self._interactive_quality if interaction_active else 95
+        encode_started_at = time.perf_counter()
         success, encoded = cv2.imencode(
             ".jpg",
             cv2.cvtColor(frame, cv2.COLOR_RGB2BGR),
@@ -673,6 +1036,7 @@ class NativeViewerWidget(_StableMarimoAnyWidget):
         )
         if not success:
             raise RuntimeError("Failed to encode rendered frame as JPEG.")
+        encode_time_ms = (time.perf_counter() - encode_started_at) * 1000.0
         encoded_bytes = encoded.tobytes()
         frame_width = int(frame.shape[1])
         frame_height = int(frame.shape[0])
@@ -685,27 +1049,85 @@ class NativeViewerWidget(_StableMarimoAnyWidget):
                 frame_width, frame_height
             ).to_json()
 
-        def _apply_frame_update() -> None:
-            self._latest_frame_array = frame.copy()
+        self._latest_frame_array = frame.copy()
+        packet = _pack_frame_packet(
+            {
+                "type": "frame",
+                "mime_type": "image/jpeg",
+                "width": frame_width,
+                "height": frame_height,
+                "revision": revision,
+                "render_time_ms": render_time_ms,
+                "backend_frame_sent_perf_time_ms": (
+                    time.perf_counter() * 1000.0
+                ),
+                "interaction_active": interaction_active,
+            },
+            encoded_bytes,
+        )
+        broadcast_future = self._stream_server.publish(
+            self._stream_path.removeprefix("/streams/"),
+            packet,
+            scheduled_at=time.perf_counter(),
+        )
+
+        if broadcast_future is not None:
+
+            def _on_broadcast_done(
+                future: concurrent.futures.Future[dict[str, float]],
+            ) -> None:
+                try:
+                    timings = future.result()
+                except Exception:
+                    return
+
+                def _apply_stream_timing_update() -> None:
+                    if not interaction_active:
+                        return
+                    smoothed_metrics = self._update_smoothed_debug_metrics(
+                        render_queue_time_ms=render_queue_time_ms,
+                        render_time_ms=render_time_ms,
+                        encode_time_ms=encode_time_ms,
+                        stream_queue_time_ms=timings["stream_queue_time_ms"],
+                        stream_send_time_ms=timings["stream_send_time_ms"],
+                    )
+                    self.widget.render_queue_time_ms = smoothed_metrics[
+                        "render_queue_time_ms"
+                    ]
+                    self.widget.render_time_ms = smoothed_metrics[
+                        "render_time_ms"
+                    ]
+                    self.widget.encode_time_ms = smoothed_metrics[
+                        "encode_time_ms"
+                    ]
+                    self.widget.stream_queue_time_ms = smoothed_metrics[
+                        "stream_queue_time_ms"
+                    ]
+                    self.widget.stream_send_time_ms = smoothed_metrics[
+                        "stream_send_time_ms"
+                    ]
+                    self.widget.send_state(
+                        [
+                            "render_queue_time_ms",
+                            "render_time_ms",
+                            "encode_time_ms",
+                            "stream_queue_time_ms",
+                            "stream_send_time_ms",
+                        ]
+                    )
+
+                self._run_on_main_loop(_apply_stream_timing_update)
+
+            broadcast_future.add_done_callback(_on_broadcast_done)
+
+        def _apply_trait_updates() -> None:
             self.widget.error_text = ""
-            self.widget.send(
-                {
-                    "type": "frame",
-                    "mime_type": "image/jpeg",
-                    "width": frame_width,
-                    "height": frame_height,
-                    "revision": revision,
-                    "render_time_ms": render_time_ms,
-                    "interaction_active": interaction_active,
-                },
-                buffers=[encoded_bytes],
-            )
             self.widget.send_state("error_text")
             if next_camera_state_json is not None:
                 self.widget.camera_state_json = next_camera_state_json
                 self.widget.send_state("camera_state_json")
 
-        self._run_on_main_loop(_apply_frame_update)
+        self._run_on_main_loop(_apply_trait_updates)
 
     def _publish_error(self, revision: int, message: str) -> None:
         del revision
@@ -731,6 +1153,7 @@ def native_viewer(
     aspect_ratio: float = 16.3 / 9.0,
     interactive_quality: int = 50,
     initial_view: CameraState | None = None,
+    state: NativeViewerState | None = None,
 ) -> NativeViewerWidget:
     """Create a native image-based 3D viewer for marimo notebooks.
 
@@ -738,12 +1161,14 @@ def native_viewer(
     measured notebook layout. `aspect_ratio` controls the initial widget height
     before the first render and resize measurement. `initial_view` sets the
     initial camera pose, convention, and nominal viewport size before the
-    widget measures the live layout.
+    widget measures the live layout. Reuse the same `state` object across
+    reruns to persist the camera state and last click even when `render_fn`
+    is recreated.
 
     The returned widget exposes:
 
-    - `camera_state` / `get_camera_state()` for the current synced view
-    - `last_click` / `get_last_click()` for the last primary-button click
+    - `get_camera_state()` for the current synced view
+    - `get_last_click()` for the last primary-button click
     - `get_snapshot()` for the latest rendered frame as a PIL image
     - `.value[...]` for direct access to synced anywidget traits
 
@@ -758,15 +1183,25 @@ def native_viewer(
             "interactive_quality must be in [1, 100], "
             f"got {interactive_quality}."
         )
-    resolved_camera_state = initial_view or CameraState.default(
-        fov_degrees=fov_degrees
+    resolved_camera_state = (
+        state.camera_state
+        if state is not None
+        else initial_view or CameraState.default(fov_degrees=fov_degrees)
     )
+    stream_server = _get_frame_stream_server()
+    stream_id, stream_token = stream_server.register_stream()
     anywidget_instance = _NativeViewerAnyWidget(
         camera_state=resolved_camera_state,
         aspect_ratio=aspect_ratio,
+        stream_port=stream_server.port,
+        stream_path=f"/streams/{stream_id}",
+        stream_token=stream_token,
     )
+    if state is not None and state.last_click is not None:
+        anywidget_instance.last_click_json = state.last_click.to_json()
     return NativeViewerWidget(
         anywidget_instance,
         render_fn=render_fn,
         interactive_quality=interactive_quality,
+        state=state,
     )

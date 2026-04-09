@@ -13,6 +13,7 @@ from marimo_viser.scene_normalization import (
 )
 from marimo_viser.viewer_widget import (
     CameraState,
+    NativeViewerState,
     NativeViewerWidget,
     ViewerClick,
     native_viewer,
@@ -21,6 +22,7 @@ from marimo_viser.viser_widget import ViserMarimoWidget, viser_marimo
 
 __all__ = [
     "CameraState",
+    "NativeViewerState",
     "NativeViewerWidget",
     "ViewerClick",
     "ViserMarimoWidget",

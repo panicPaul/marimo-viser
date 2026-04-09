@@ -8,7 +8,12 @@ import numpy as np
 import pytest
 import torch
 
-from marimo_viser import CameraState, ViewerClick, native_viewer
+from marimo_viser import (
+    CameraState,
+    NativeViewerState,
+    ViewerClick,
+    native_viewer,
+)
 from marimo_viser.viewer_widget import (
     _convert_cam_to_world_between_conventions,
     _LatestOnlyRenderer,
@@ -137,14 +142,13 @@ def test_native_viewer_last_click_reads_synced_widget_state() -> None:
 
     viewer.anywidget().last_click_json = click.to_json()
 
-    assert viewer.last_click is not None
     assert viewer.get_last_click() is not None
-    assert viewer.last_click.x == click.x
-    assert viewer.last_click.y == click.y
-    assert viewer.last_click.width == click.width
-    assert viewer.last_click.height == click.height
+    assert viewer.get_last_click().x == click.x
+    assert viewer.get_last_click().y == click.y
+    assert viewer.get_last_click().width == click.width
+    assert viewer.get_last_click().height == click.height
     assert np.allclose(
-        viewer.last_click.camera_state.cam_to_world,
+        viewer.get_last_click().camera_state.cam_to_world,
         click.camera_state.cam_to_world,
     )
     assert viewer.get_last_click().x == click.x
@@ -224,10 +228,12 @@ def test_latest_only_renderer_drops_stale_results() -> None:
         revision: int,
         camera_state: CameraState,
         frame: np.ndarray,
+        render_queue_time_ms: float,
         render_time_ms: float,
         interaction_active: bool,
     ) -> None:
         del frame
+        assert render_queue_time_ms >= 0.0
         assert render_time_ms >= 0.0
         assert isinstance(interaction_active, bool)
         published.append((revision, camera_state.width))
@@ -256,9 +262,83 @@ def test_native_viewer_set_camera_state_updates_widget_state() -> None:
 
     viewer.set_camera_state(updated)
 
-    assert viewer.camera_state.width == 32
-    assert viewer.camera_state.height == 24
-    assert viewer.camera_state.fov_degrees == 45.0
+    assert viewer.get_camera_state().width == 32
+    assert viewer.get_camera_state().height == 24
+    assert viewer.get_camera_state().fov_degrees == 45.0
+
+
+def test_native_viewer_reuses_explicit_state_across_reruns() -> None:
+    state = NativeViewerState(
+        camera_state=CameraState.default(width=64, height=48)
+    )
+    first_viewer = native_viewer(
+        lambda camera_state: np.zeros(
+            (camera_state.height, camera_state.width, 3), dtype=np.uint8
+        ),
+        state=state,
+    )
+    updated_camera_state = CameraState.default(
+        width=32, height=24, fov_degrees=45.0
+    )
+
+    first_viewer.set_camera_state(updated_camera_state)
+
+    second_viewer = native_viewer(
+        lambda camera_state: np.zeros(
+            (camera_state.height, camera_state.width, 3), dtype=np.uint8
+        ),
+        state=state,
+    )
+
+    assert second_viewer.get_camera_state().width == 32
+    assert second_viewer.get_camera_state().height == 24
+    assert second_viewer.get_camera_state().fov_degrees == 45.0
+
+
+def test_native_viewer_get_debug_info_reads_synced_metrics() -> None:
+    viewer = native_viewer(
+        lambda state: np.zeros((state.height, state.width, 3), dtype=np.uint8)
+    )
+    widget = viewer.anywidget()
+    widget.error_text = "boom"
+    widget.latency_ms = 12.5
+    widget.latency_sample_ms = 11.0
+    widget.render_time_ms = 1.25
+    widget.render_queue_time_ms = 3.5
+    widget.encode_time_ms = 0.75
+    widget.stream_queue_time_ms = 0.5
+    widget.stream_send_time_ms = 1.0
+    widget.backend_to_browser_time_ms = 3.0
+    widget.packet_size_bytes = 12345
+    widget.browser_receive_queue_ms = 4.0
+    widget.browser_post_receive_ms = 14.0
+    widget.browser_decode_time_ms = 2.0
+    widget.browser_draw_time_ms = 0.25
+    widget.browser_present_wait_ms = 8.5
+
+    assert viewer.get_debug_info() == {
+        "error_text": "boom",
+        "latency_ms": 12.5,
+        "latency_sample_ms": 11.0,
+        "render_time_ms": 1.25,
+        "render_queue_time_ms": 3.5,
+        "encode_time_ms": 0.75,
+        "stream_queue_time_ms": 0.5,
+        "stream_send_time_ms": 1.0,
+        "backend_to_browser_time_ms": 3.0,
+        "packet_size_bytes": 12345,
+        "browser_receive_queue_ms": 4.0,
+        "browser_post_receive_ms": 14.0,
+        "browser_decode_time_ms": 2.0,
+        "browser_draw_time_ms": 0.25,
+        "browser_present_wait_ms": 8.5,
+        "accounted_leaf_latency_ms": 21.75,
+        "unaccounted_leaf_latency_ms": -9.25,
+        "unaccounted_leaf_latency_sample_ms": -10.75,
+        "accounted_coarse_latency_ms": 25.0,
+        "unaccounted_coarse_latency_ms": -12.5,
+        "unaccounted_coarse_latency_sample_ms": -14.0,
+    }
 
 
 def test_native_viewer_exposes_configured_aspect_ratio() -> None:

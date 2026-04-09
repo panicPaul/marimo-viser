@@ -6,23 +6,64 @@ __generated_with = "0.23.0"
 app = marimo.App(width="columns")
 
 with app.setup:
+    from functools import partial
+    from typing import Literal
+
     import marimo as mo
     import torch
     from rich import print
 
-    from marimo_viser import CameraState, native_viewer
+    from marimo_viser import CameraState, NativeViewerState, native_viewer
 
 
 @app.cell
 def _():
-    viewer = native_viewer(render_fn)
+    viewer_state = NativeViewerState()
+    return (viewer_state,)
+
+
+@app.cell
+def _():
+    viewer_render_fn = partial(render_fn, noise=0.30, noise_kind="blue")
+    return (viewer_render_fn,)
+
+
+@app.cell
+def _(viewer_render_fn, viewer_state):
+    viewer = native_viewer(
+        viewer_render_fn,
+        interactive_quality=50,
+        state=viewer_state,
+    )
     viewer
     return (viewer,)
 
 
 @app.cell
 def _(viewer):
-    viewer.value["error_text"]
+    viewer.get_debug_info()
+    return
+
+
+@app.cell
+def _(viewer):
+    debug_info = viewer.get_debug_info()
+    print(
+        f"unaccounted leaf (sample): "
+        f"{debug_info['unaccounted_leaf_latency_sample_ms']}"
+    )
+    print(
+        f"unaccounted leaf (avg): {debug_info['unaccounted_leaf_latency_ms']}"
+    )
+
+    print(
+        f"unaccounted coarse (sample): "
+        f"{debug_info['unaccounted_coarse_latency_sample_ms']}"
+    )
+    print(
+        f"unaccounted coarse (avg): "
+        f"{debug_info['unaccounted_coarse_latency_ms']}"
+    )
     return
 
 
@@ -32,15 +73,19 @@ def _(viewer):
     Current camera JSON:
 
     ```json
-    {viewer.camera_state.to_json()}
+    {viewer.get_camera_state().to_json()}
     ```
     """)
     return
 
 
 @app.function
-def render_fn(camera_state: CameraState) -> torch.Tensor:
-    """Render a simple ray-direction visualization."""
+def render_fn(
+    camera_state: CameraState,
+    noise: float = 0.0,
+    noise_kind: Literal["white", "blue"] = "white",
+) -> torch.Tensor:
+    """Render a ray-direction visualization with deterministic directional noise."""
     device = torch.device("cuda")
     width = camera_state.width
     height = camera_state.height
@@ -83,12 +128,50 @@ def render_fn(camera_state: CameraState) -> torch.Tensor:
     world_dirs = world_dirs / torch.linalg.norm(
         world_dirs, dim=-1, keepdim=True
     )
-    return (((world_dirs + 1.0) / 2.0) * 255.0).to(torch.uint8)
+    base_image = (world_dirs + 1.0) / 2.0
+    quantized_dirs = torch.round((world_dirs + 1.0) * 1024.0)
+    direction_hashes = torch.stack(
+        (
+            quantized_dirs[..., 0] * 127.1
+            + quantized_dirs[..., 1] * 311.7
+            + quantized_dirs[..., 2] * 74.7,
+            quantized_dirs[..., 0] * 269.5
+            + quantized_dirs[..., 1] * 183.3
+            + quantized_dirs[..., 2] * 246.1,
+            quantized_dirs[..., 0] * 113.5
+            + quantized_dirs[..., 1] * 271.9
+            + quantized_dirs[..., 2] * 124.6,
+        ),
+        dim=-1,
+    )
+    white_noise = (
+        torch.frac(torch.sin(direction_hashes) * 43758.5453) * 2.0 - 1.0
+    )
+    if noise_kind == "blue":
+        white_noise_chw = white_noise.permute(2, 0, 1).unsqueeze(0)
+        local_mean = torch.nn.functional.avg_pool2d(
+            white_noise_chw,
+            kernel_size=5,
+            stride=1,
+            padding=2,
+        )
+        directional_noise = (
+            (white_noise_chw - local_mean).squeeze(0).permute(1, 2, 0)
+        )
+        directional_noise = directional_noise / directional_noise.abs().amax(
+            dim=(0, 1),
+            keepdim=True,
+        ).clamp_min(1e-4)
+    else:
+        directional_noise = white_noise
+    return ((base_image + directional_noise * noise).clip(0, 1) * 255.0).to(
+        torch.uint8
+    )
 
 
 @app.cell
 def _(viewer):
-    print(viewer.camera_state)
+    print(viewer.get_camera_state())
     return
 
 

@@ -145,6 +145,22 @@ function bufferToUint8Array(buffer) {
   return null;
 }
 
+function parseFramePacket(packet) {
+  const bytes = bufferToUint8Array(packet);
+  if (bytes === null || bytes.byteLength < 4) {
+    return null;
+  }
+  const headerLength =
+    (bytes[0] << 24) | (bytes[1] << 16) | (bytes[2] << 8) | bytes[3];
+  if (headerLength < 0 || bytes.byteLength < 4 + headerLength) {
+    return null;
+  }
+  const headerBytes = bytes.subarray(4, 4 + headerLength);
+  const payload = bytes.subarray(4 + headerLength);
+  const header = JSON.parse(new TextDecoder().decode(headerBytes));
+  return { header, payload };
+}
+
 function render({ model, el }) {
   const root = document.createElement("div");
   root.className = "native-viewer-root";
@@ -185,13 +201,36 @@ function render({ model, el }) {
   const clickThresholdPixels = 4.0;
   let lastFrameRevision = -1;
   let averageLatencyMs = null;
+  let lastLatencySampleMs = null;
   let lastLatencySampleAtMs = null;
   let lastRenderTimeMs = null;
+  let lastDecodeTimeMs = null;
+  let lastDrawTimeMs = null;
+  let lastPresentWaitTimeMs = null;
+  let lastReceiveQueueTimeMs = null;
+  let lastPostReceiveTimeMs = null;
+  let lastPacketSizeBytes = 0;
+  let lastBackendToBrowserTimeMs = null;
+  let smoothedRenderTimeMs = null;
+  let smoothedDecodeTimeMs = null;
+  let smoothedDrawTimeMs = null;
+  let smoothedPresentWaitTimeMs = null;
+  let smoothedReceiveQueueTimeMs = null;
+  let smoothedPostReceiveTimeMs = null;
+  let smoothedPacketSizeBytes = null;
+  let smoothedBackendToBrowserTimeMs = null;
   const revisionSentAtMs = new Map();
   let latestScheduledFrameRevision = -1;
   let interactionActive = Boolean(model.get("interaction_active"));
   let settleTimeoutId = null;
   const settleDelayMs = 150;
+  let streamSocket = null;
+  let reconnectTimeoutId = null;
+  let closed = false;
+  let nextClockSyncPingId = 0;
+  let bestClockSyncRttMs = null;
+  let backendClockOffsetMs = null;
+  const pendingClockSyncPings = new Map();
 
   function updateAspectRatio() {
     const explicitAspectRatio = Number(model.get("aspect_ratio"));
@@ -225,6 +264,42 @@ function render({ model, el }) {
     }
     latencyBadge.textContent =
       `${latencyText} | render ${Math.round(lastRenderTimeMs)} ms`;
+  }
+
+  function syncMetricsToModel() {
+    if (
+      averageLatencyMs === null
+      || smoothedRenderTimeMs === null
+      || smoothedReceiveQueueTimeMs === null
+      || smoothedPostReceiveTimeMs === null
+      || smoothedDecodeTimeMs === null
+      || smoothedDrawTimeMs === null
+      || smoothedPresentWaitTimeMs === null
+      || smoothedPacketSizeBytes === null
+    ) {
+      return;
+    }
+    model.set("latency_ms", averageLatencyMs);
+    model.set("latency_sample_ms", lastLatencySampleMs);
+    model.set("render_time_ms", smoothedRenderTimeMs);
+    model.set(
+      "backend_to_browser_time_ms",
+      smoothedBackendToBrowserTimeMs ?? 0.0,
+    );
+    model.set("packet_size_bytes", Math.round(smoothedPacketSizeBytes));
+    model.set("browser_receive_queue_ms", smoothedReceiveQueueTimeMs);
+    model.set("browser_post_receive_ms", smoothedPostReceiveTimeMs);
+    model.set("browser_decode_time_ms", smoothedDecodeTimeMs);
+    model.set("browser_draw_time_ms", smoothedDrawTimeMs);
+    model.set("browser_present_wait_ms", smoothedPresentWaitTimeMs);
+    model.save_changes();
+  }
+
+  function smoothMetric(previous, sample, shouldReset) {
+    if (previous === null || shouldReset) {
+      return sample;
+    }
+    return previous * 0.85 + sample * 0.15;
   }
 
   function updatePoseFromMatrix() {
@@ -395,16 +470,15 @@ function render({ model, el }) {
     }
   }
 
-  function registerFrameMetrics(revision, renderTimeMs) {
-    lastFrameRevision = revision;
+  function registerFrameMetrics(revision, renderTimeMs, shouldReset) {
+    let latencySampleMs = null;
     const sentAtMs = revisionSentAtMs.get(revision);
     if (sentAtMs !== undefined) {
       const now = performance.now();
       const latencyMs = Math.max(0.0, now - sentAtMs);
-      const shouldResetAverage =
-        lastLatencySampleAtMs === null || now - lastLatencySampleAtMs > 1000.0;
+      latencySampleMs = latencyMs;
       averageLatencyMs =
-        averageLatencyMs === null || shouldResetAverage
+        averageLatencyMs === null || shouldReset
           ? latencyMs
           : averageLatencyMs * 0.85 + latencyMs * 0.15;
       lastLatencySampleAtMs = now;
@@ -418,23 +492,250 @@ function render({ model, el }) {
         revisionSentAtMs.delete(pendingRevision);
       }
     }
+    if (latencySampleMs !== null) {
+      lastLatencySampleMs = latencySampleMs;
+    }
+    if (typeof renderTimeMs === "number" && Number.isFinite(renderTimeMs)) {
+      smoothedRenderTimeMs = smoothMetric(
+        smoothedRenderTimeMs,
+        renderTimeMs,
+        shouldReset,
+      );
+    }
     updateLatencyBadge();
+    syncMetricsToModel();
   }
 
-  async function drawFrame(bytes, width, height, revision, renderTimeMs, mimeType) {
+  async function drawFrame(
+    bytes,
+    width,
+    height,
+    revision,
+    renderTimeMs,
+    interactionActiveFrame,
+    mimeType,
+    messageReceivedAtMs,
+    backendFrameSentPerfTimeMs,
+  ) {
     latestScheduledFrameRevision = Math.max(latestScheduledFrameRevision, revision);
+    const decodeEnqueueAt = performance.now();
+    const shouldReset =
+      lastLatencySampleAtMs === null
+      || decodeEnqueueAt - lastLatencySampleAtMs > 1000.0;
     const blob = new Blob([bytes], { type: mimeType || "image/jpeg" });
+    const decodeStartedAt = performance.now();
     const bitmap = await createImageBitmap(blob);
+    const decodeFinishedAt = performance.now();
     if (revision < latestScheduledFrameRevision || revision < lastFrameRevision) {
       bitmap.close();
       return;
     }
+    const drawStartedAt = performance.now();
     frame.width = width;
     frame.height = height;
     frameContext.clearRect(0, 0, width, height);
     frameContext.drawImage(bitmap, 0, 0, width, height);
     bitmap.close();
-    registerFrameMetrics(revision, renderTimeMs);
+    lastFrameRevision = revision;
+    const drawFinishedAt = performance.now();
+    if (interactionActiveFrame) {
+      const receiveQueueTimeMs = decodeEnqueueAt - messageReceivedAtMs;
+      lastReceiveQueueTimeMs = receiveQueueTimeMs;
+      lastPacketSizeBytes = bytes.byteLength;
+      await new Promise((resolve) => {
+        requestAnimationFrame(() => resolve(performance.now()));
+      }).then((presentedAtNow) => {
+        lastPresentWaitTimeMs = presentedAtNow - drawFinishedAt;
+      });
+      lastDecodeTimeMs = decodeFinishedAt - decodeStartedAt;
+      lastDrawTimeMs = drawFinishedAt - drawStartedAt;
+      lastPostReceiveTimeMs = performance.now() - messageReceivedAtMs;
+      const shouldReset =
+        lastLatencySampleAtMs === null
+        || performance.now() - lastLatencySampleAtMs > 1000.0;
+      if (
+        backendClockOffsetMs !== null
+        && typeof backendFrameSentPerfTimeMs === "number"
+        && Number.isFinite(backendFrameSentPerfTimeMs)
+      ) {
+        const estimatedClientSentAtMs =
+          backendFrameSentPerfTimeMs - backendClockOffsetMs;
+        lastBackendToBrowserTimeMs = Math.max(
+          0.0,
+          messageReceivedAtMs - estimatedClientSentAtMs,
+        );
+        smoothedBackendToBrowserTimeMs = smoothMetric(
+          smoothedBackendToBrowserTimeMs,
+          lastBackendToBrowserTimeMs,
+          shouldReset,
+        );
+      }
+      smoothedDecodeTimeMs = smoothMetric(
+        smoothedDecodeTimeMs,
+        lastDecodeTimeMs,
+        shouldReset,
+      );
+      smoothedDrawTimeMs = smoothMetric(
+        smoothedDrawTimeMs,
+        lastDrawTimeMs,
+        shouldReset,
+      );
+      smoothedPresentWaitTimeMs = smoothMetric(
+        smoothedPresentWaitTimeMs,
+        lastPresentWaitTimeMs,
+        shouldReset,
+      );
+      smoothedReceiveQueueTimeMs = smoothMetric(
+        smoothedReceiveQueueTimeMs,
+        receiveQueueTimeMs,
+        shouldReset,
+      );
+      smoothedPostReceiveTimeMs = smoothMetric(
+        smoothedPostReceiveTimeMs,
+        lastPostReceiveTimeMs,
+        shouldReset,
+      );
+      smoothedPacketSizeBytes = smoothMetric(
+        smoothedPacketSizeBytes,
+        lastPacketSizeBytes,
+        shouldReset,
+      );
+      registerFrameMetrics(revision, renderTimeMs, shouldReset);
+      return;
+    }
+    revisionSentAtMs.delete(revision);
+  }
+
+  function scheduleReconnect() {
+    if (closed || reconnectTimeoutId !== null) {
+      return;
+    }
+    reconnectTimeoutId = setTimeout(() => {
+      reconnectTimeoutId = null;
+      connectFrameStream();
+    }, 250);
+  }
+
+  function sendClockSyncPing() {
+    if (streamSocket === null || streamSocket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    const pingId = nextClockSyncPingId;
+    nextClockSyncPingId += 1;
+    const clientSentAtMs = performance.now();
+    pendingClockSyncPings.set(pingId, clientSentAtMs);
+    streamSocket.send(JSON.stringify({
+      type: "clock_sync_ping",
+      ping_id: pingId,
+      client_sent_at_ms: clientSentAtMs,
+    }));
+  }
+
+  function disconnectFrameStream() {
+    if (reconnectTimeoutId !== null) {
+      clearTimeout(reconnectTimeoutId);
+      reconnectTimeoutId = null;
+    }
+    pendingClockSyncPings.clear();
+    if (streamSocket !== null) {
+      const socket = streamSocket;
+      streamSocket = null;
+      socket.onopen = null;
+      socket.onmessage = null;
+      socket.onerror = null;
+      socket.onclose = null;
+      if (
+        socket.readyState === WebSocket.OPEN
+        || socket.readyState === WebSocket.CONNECTING
+      ) {
+        socket.close();
+      }
+    }
+  }
+
+  function connectFrameStream() {
+    disconnectFrameStream();
+    const streamPort = Number(model.get("stream_port"));
+    const streamPath = model.get("stream_path");
+    const streamToken = model.get("stream_token");
+    if (!Number.isFinite(streamPort) || streamPort <= 0 || !streamPath || !streamToken) {
+      return;
+    }
+    const streamUrl =
+      `ws://${window.location.hostname}:${streamPort}${streamPath}?token=${encodeURIComponent(streamToken)}`;
+    const socket = new WebSocket(streamUrl);
+    socket.binaryType = "arraybuffer";
+    socket.onopen = () => {
+      sendClockSyncPing();
+    };
+    socket.onmessage = (event) => {
+      if (typeof event.data === "string") {
+        let message = null;
+        try {
+          message = JSON.parse(event.data);
+        } catch (_error) {
+          return;
+        }
+        if (message.type !== "clock_sync_pong") {
+          return;
+        }
+        const pingId = Number(message.ping_id);
+        const clientSentAtMs = pendingClockSyncPings.get(pingId);
+        if (clientSentAtMs === undefined) {
+          return;
+        }
+        pendingClockSyncPings.delete(pingId);
+        const clientReceivedAtMs = performance.now();
+        const serverReceivedAtMs = Number(message.server_received_at_ms);
+        if (!Number.isFinite(serverReceivedAtMs)) {
+          return;
+        }
+        const rttMs = clientReceivedAtMs - clientSentAtMs;
+        const offsetMs =
+          serverReceivedAtMs - ((clientSentAtMs + clientReceivedAtMs) / 2.0);
+        if (bestClockSyncRttMs === null || rttMs < bestClockSyncRttMs) {
+          bestClockSyncRttMs = rttMs;
+          backendClockOffsetMs = offsetMs;
+        } else if (backendClockOffsetMs === null) {
+          backendClockOffsetMs = offsetMs;
+        } else {
+          backendClockOffsetMs = backendClockOffsetMs * 0.9 + offsetMs * 0.1;
+        }
+        return;
+      }
+      const messageReceivedAtMs = performance.now();
+      const packet = parseFramePacket(event.data);
+      if (packet === null) {
+        return;
+      }
+      if (
+        typeof packet.header.revision === "number"
+        && packet.header.revision % 30 === 0
+      ) {
+        sendClockSyncPing();
+      }
+      void drawFrame(
+        packet.payload,
+        packet.header.width ?? 0,
+        packet.header.height ?? 0,
+        packet.header.revision ?? -1,
+        packet.header.render_time_ms,
+        Boolean(packet.header.interaction_active),
+        packet.header.mime_type,
+        messageReceivedAtMs,
+        packet.header.backend_frame_sent_perf_time_ms,
+      );
+    };
+    socket.onerror = () => {
+      scheduleReconnect();
+    };
+    socket.onclose = () => {
+      if (streamSocket === socket) {
+        streamSocket = null;
+      }
+      scheduleReconnect();
+    };
+    streamSocket = socket;
   }
 
   function applyCameraStateJson() {
@@ -583,35 +884,23 @@ function render({ model, el }) {
     updateAspectRatio();
     pushCameraState();
   };
-  const onCustomMessage = (content, buffers) => {
-    if (content?.type !== "frame") {
-      return;
-    }
-    const bytes = bufferToUint8Array(buffers?.[0]);
-    if (bytes === null) {
-      return;
-    }
-    void drawFrame(
-      bytes,
-      content.width ?? 0,
-      content.height ?? 0,
-      content.revision ?? -1,
-      content.render_time_ms,
-      content.mime_type,
-    );
-  };
-
   const onInteractionActiveChange = () => {
     interactionActive = Boolean(model.get("interaction_active"));
+  };
+  const onStreamConfigChange = () => {
+    connectFrameStream();
   };
 
   model.on("change:camera_state_json", onCameraChange);
   model.on("change:aspect_ratio", onAspectRatioChange);
   model.on("change:interaction_active", onInteractionActiveChange);
-  model.on("msg:custom", onCustomMessage);
+  model.on("change:stream_port", onStreamConfigChange);
+  model.on("change:stream_path", onStreamConfigChange);
+  model.on("change:stream_token", onStreamConfigChange);
 
   updateAspectRatio();
   updateLatencyBadge();
+  connectFrameStream();
   pushCameraState();
 
   return () => {
@@ -619,10 +908,14 @@ function render({ model, el }) {
     if (animationFrame !== null) {
       cancelAnimationFrame(animationFrame);
     }
+    closed = true;
+    disconnectFrameStream();
     model.off("change:camera_state_json", onCameraChange);
     model.off("change:aspect_ratio", onAspectRatioChange);
     model.off("change:interaction_active", onInteractionActiveChange);
-    model.off("msg:custom", onCustomMessage);
+    model.off("change:stream_port", onStreamConfigChange);
+    model.off("change:stream_path", onStreamConfigChange);
+    model.off("change:stream_token", onStreamConfigChange);
     if (settleTimeoutId !== null) {
       clearTimeout(settleTimeoutId);
     }

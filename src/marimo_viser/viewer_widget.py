@@ -6,6 +6,7 @@ import asyncio
 import io
 import json
 import threading
+import time
 import traceback
 from collections.abc import Callable, Iterator, MutableMapping
 from dataclasses import dataclass
@@ -446,7 +447,7 @@ class _LatestOnlyRenderer:
     def __init__(
         self,
         render_fn: Callable[[CameraState], np.ndarray | torch.Tensor],
-        publish_frame: Callable[[int, CameraState, np.ndarray], None],
+        publish_frame: Callable[[int, CameraState, np.ndarray, float], None],
         publish_error: Callable[[int, str], None],
         set_rendering: Callable[[bool], None],
     ) -> None:
@@ -481,7 +482,12 @@ class _LatestOnlyRenderer:
 
             assert camera_state is not None
             try:
-                frame = _normalize_frame(self._render_fn(camera_state))
+                render_started_at = time.perf_counter()
+                rendered_frame = self._render_fn(camera_state)
+                render_time_ms = (
+                    time.perf_counter() - render_started_at
+                ) * 1000.0
+                frame = _normalize_frame(rendered_frame)
             except Exception as exception:
                 message = "".join(
                     traceback.format_exception(
@@ -504,7 +510,9 @@ class _LatestOnlyRenderer:
                 continue
 
             try:
-                self._publish_frame(revision, camera_state, frame)
+                self._publish_frame(
+                    revision, camera_state, frame, render_time_ms
+                )
             except Exception as exception:
                 message = "".join(
                     traceback.format_exception(
@@ -526,10 +534,6 @@ class _NativeViewerAnyWidget(anywidget.AnyWidget):
     camera_state_json = traitlets.Unicode("").tag(sync=True)
     aspect_ratio = traitlets.Float(16.3 / 9.0).tag(sync=True)
     _camera_revision = traitlets.Int(0).tag(sync=True)
-    frame_url = traitlets.Unicode("").tag(sync=True)
-    frame_width = traitlets.Int(1).tag(sync=True)
-    frame_height = traitlets.Int(1).tag(sync=True)
-    _frame_revision = traitlets.Int(0).tag(sync=True)
     last_click_json = traitlets.Unicode("").tag(sync=True)
     is_rendering = traitlets.Bool(False).tag(sync=True)
     error_text = traitlets.Unicode("").tag(sync=True)
@@ -548,8 +552,6 @@ class _NativeViewerAnyWidget(anywidget.AnyWidget):
         super().__init__(
             camera_state_json=camera_state.to_json(),
             aspect_ratio=aspect_ratio,
-            frame_width=camera_state.width,
-            frame_height=camera_state.height,
         )
 
 
@@ -648,6 +650,7 @@ class NativeViewerWidget(_StableMarimoAnyWidget):
         revision: int,
         camera_state: CameraState,
         frame: np.ndarray,
+        render_time_ms: float,
     ) -> None:
         success, encoded = cv2.imencode(
             ".jpg",
@@ -670,21 +673,19 @@ class NativeViewerWidget(_StableMarimoAnyWidget):
 
         def _apply_frame_update() -> None:
             self._latest_frame_bytes = encoded_bytes
-            frame_file = VirtualFile.create_and_register(encoded_bytes, "jpg")
-            self.widget.frame_width = frame_width
-            self.widget.frame_height = frame_height
-            self.widget.frame_url = frame_file.url
-            self.widget._frame_revision = revision
             self.widget.error_text = ""
-            self.widget.send_state(
-                [
-                    "frame_width",
-                    "frame_height",
-                    "frame_url",
-                    "_frame_revision",
-                    "error_text",
-                ]
+            self.widget.send(
+                {
+                    "type": "frame",
+                    "mime_type": "image/jpeg",
+                    "width": frame_width,
+                    "height": frame_height,
+                    "revision": revision,
+                    "render_time_ms": render_time_ms,
+                },
+                buffers=[encoded_bytes],
             )
+            self.widget.send_state("error_text")
             if next_camera_state_json is not None:
                 self.widget.camera_state_json = next_camera_state_json
                 self.widget.send_state("camera_state_json")

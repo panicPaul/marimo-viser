@@ -132,6 +132,19 @@ function parseCameraState(cameraStateJson) {
   };
 }
 
+function bufferToUint8Array(buffer) {
+  if (buffer instanceof Uint8Array) {
+    return buffer;
+  }
+  if (buffer instanceof ArrayBuffer) {
+    return new Uint8Array(buffer);
+  }
+  if (ArrayBuffer.isView(buffer)) {
+    return new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+  }
+  return null;
+}
+
 function render({ model, el }) {
   const root = document.createElement("div");
   root.className = "native-viewer-root";
@@ -146,19 +159,11 @@ function render({ model, el }) {
   const overlay = document.createElement("div");
   overlay.className = "native-viewer-overlay";
 
-  const statusBadge = document.createElement("div");
-  statusBadge.className = "native-viewer-badge";
+  const latencyBadge = document.createElement("div");
+  latencyBadge.className = "native-viewer-badge native-viewer-latency";
+  latencyBadge.hidden = true;
 
-  const errorBadge = document.createElement("div");
-  errorBadge.className = "native-viewer-badge native-viewer-error";
-  errorBadge.hidden = true;
-
-  const debugBadge = document.createElement("div");
-  debugBadge.className = "native-viewer-badge native-viewer-debug";
-
-  overlay.appendChild(statusBadge);
-  overlay.appendChild(errorBadge);
-  overlay.appendChild(debugBadge);
+  overlay.appendChild(latencyBadge);
   root.appendChild(overlay);
   el.appendChild(root);
 
@@ -175,8 +180,12 @@ function render({ model, el }) {
   let lastTickMs = null;
   const pressedKeys = new Set();
   const clickThresholdPixels = 4.0;
-  let lastResolvedFrameUrl = "";
-  let lastImageEvent = "none";
+  let currentFrameUrl = "";
+  let lastFrameRevision = -1;
+  let averageLatencyMs = null;
+  let lastLatencySampleAtMs = null;
+  let lastRenderTimeMs = null;
+  const revisionSentAtMs = new Map();
 
   function updateAspectRatio() {
     const explicitAspectRatio = Number(model.get("aspect_ratio"));
@@ -197,20 +206,19 @@ function render({ model, el }) {
     };
   }
 
-  function updateStatus() {
-    const renderingText = model.get("is_rendering") ? "rendering" : "idle";
-    statusBadge.textContent = `${model.get("controls_hint")}\nState: ${renderingText}`;
-
-    const errorText = model.get("error_text");
-    errorBadge.hidden = !errorText;
-    errorBadge.textContent = errorText;
-
-    debugBadge.textContent = [
-      `img.complete=${frame.complete}`,
-      `natural=${frame.naturalWidth}x${frame.naturalHeight}`,
-      `last_event=${lastImageEvent}`,
-      `frame_url=${lastResolvedFrameUrl || "(empty)"}`,
-    ].join("\n");
+  function updateLatencyBadge() {
+    if (averageLatencyMs === null) {
+      latencyBadge.hidden = true;
+      return;
+    }
+    latencyBadge.hidden = false;
+    const latencyText = `${Math.round(averageLatencyMs)} ms`;
+    if (lastRenderTimeMs === null) {
+      latencyBadge.textContent = latencyText;
+      return;
+    }
+    latencyBadge.textContent =
+      `${latencyText} | render ${Math.round(lastRenderTimeMs)} ms`;
   }
 
   function updatePoseFromMatrix() {
@@ -252,8 +260,10 @@ function render({ model, el }) {
     if (nextJson === model.get("camera_state_json")) {
       return;
     }
+    const nextRevision = model.get("_camera_revision") + 1;
+    revisionSentAtMs.set(nextRevision, performance.now());
     model.set("camera_state_json", nextJson);
-    model.set("_camera_revision", model.get("_camera_revision") + 1);
+    model.set("_camera_revision", nextRevision);
     model.save_changes();
   }
 
@@ -342,33 +352,41 @@ function render({ model, el }) {
     }
   }
 
-  function drawFrame() {
-    const frameUrl = model.get("frame_url");
-    if (!frameUrl) {
-      lastResolvedFrameUrl = "";
-      lastImageEvent = "empty-url";
-      updateStatus();
-      return;
+  function setFrameFromBlob(blob, revision, renderTimeMs) {
+    if (currentFrameUrl) {
+      URL.revokeObjectURL(currentFrameUrl);
     }
-    lastResolvedFrameUrl = new URL(frameUrl, window.location.href).toString();
-    lastImageEvent = "src-set";
-    frame.src = lastResolvedFrameUrl;
-    updateStatus();
+    currentFrameUrl = URL.createObjectURL(blob);
+    lastFrameRevision = revision;
+    frame.src = currentFrameUrl;
+    const sentAtMs = revisionSentAtMs.get(revision);
+    if (sentAtMs !== undefined) {
+      const now = performance.now();
+      const latencyMs = Math.max(0.0, now - sentAtMs);
+      const shouldResetAverage =
+        lastLatencySampleAtMs === null || now - lastLatencySampleAtMs > 1000.0;
+      averageLatencyMs =
+        averageLatencyMs === null || shouldResetAverage
+          ? latencyMs
+          : averageLatencyMs * 0.85 + latencyMs * 0.15;
+      lastLatencySampleAtMs = now;
+      revisionSentAtMs.delete(revision);
+    }
+    if (typeof renderTimeMs === "number" && Number.isFinite(renderTimeMs)) {
+      lastRenderTimeMs = renderTimeMs;
+    }
+    for (const pendingRevision of revisionSentAtMs.keys()) {
+      if (pendingRevision < revision) {
+        revisionSentAtMs.delete(pendingRevision);
+      }
+    }
+    updateLatencyBadge();
   }
 
-  frame.addEventListener("load", () => {
-    lastImageEvent = "load";
-    updateStatus();
-    if (model.get("error_text").startsWith("Image decode failed:")) {
-      model.set("error_text", "");
-      model.save_changes();
-    }
-  });
+  frame.addEventListener("load", () => {});
 
   frame.addEventListener("error", () => {
-    lastImageEvent = "error";
-    updateStatus();
-    model.set("error_text", `Image decode failed: url=${lastResolvedFrameUrl}`);
+    model.set("error_text", `Image decode failed: revision=${lastFrameRevision}`);
     model.save_changes();
   });
 
@@ -504,37 +522,42 @@ function render({ model, el }) {
   });
   resizeObserver.observe(root);
 
-  const onFrameChange = () => drawFrame();
-  const onStatusChange = () => updateStatus();
   const onCameraChange = () => applyCameraStateJson();
   const onAspectRatioChange = () => {
     updateAspectRatio();
     pushCameraState();
   };
+  const onCustomMessage = (content, buffers) => {
+    if (content?.type !== "frame") {
+      return;
+    }
+    const bytes = bufferToUint8Array(buffers?.[0]);
+    if (bytes === null) {
+      return;
+    }
+    const blob = new Blob([bytes], { type: content.mime_type || "image/jpeg" });
+    setFrameFromBlob(blob, content.revision ?? -1, content.render_time_ms);
+  };
 
-  model.on("change:frame_url", onFrameChange);
-  model.on("change:_frame_revision", onFrameChange);
-  model.on("change:is_rendering", onStatusChange);
-  model.on("change:error_text", onStatusChange);
   model.on("change:camera_state_json", onCameraChange);
   model.on("change:aspect_ratio", onAspectRatioChange);
+  model.on("msg:custom", onCustomMessage);
 
   updateAspectRatio();
-  updateStatus();
+  updateLatencyBadge();
   pushCameraState();
-  drawFrame();
 
   return () => {
     resizeObserver.disconnect();
     if (animationFrame !== null) {
       cancelAnimationFrame(animationFrame);
     }
-    model.off("change:frame_url", onFrameChange);
-    model.off("change:_frame_revision", onFrameChange);
-    model.off("change:is_rendering", onStatusChange);
-    model.off("change:error_text", onStatusChange);
+    if (currentFrameUrl) {
+      URL.revokeObjectURL(currentFrameUrl);
+    }
     model.off("change:camera_state_json", onCameraChange);
     model.off("change:aspect_ratio", onAspectRatioChange);
+    model.off("msg:custom", onCustomMessage);
   };
 }
 

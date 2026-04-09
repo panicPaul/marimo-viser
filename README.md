@@ -77,35 +77,45 @@ depend on `widget.value`.
 Native viewer mode:
 
 ```python
-import numpy as np
+import torch
 
 from marimo_viser import CameraState, native_viewer
 
 
-def render_fn(camera_state: CameraState) -> np.ndarray:
+def render_fn(camera_state: CameraState) -> torch.Tensor:
+    device = torch.device("cuda")
     width = camera_state.width
     height = camera_state.height
-    cam_to_world = camera_state.cam_to_world
-    fov_radians = np.deg2rad(camera_state.fov_degrees)
-
-    x_coords = np.linspace(-1.0, 1.0, width, dtype=np.float32)
-    y_coords = np.linspace(1.0, -1.0, height, dtype=np.float32)
-    pixel_grid_x, pixel_grid_y = np.meshgrid(x_coords, y_coords, indexing="xy")
-    aspect_ratio = width / height
-    tan_half_fov = np.tan(fov_radians / 2.0)
-
-    camera_dirs = np.stack(
-        [
-            pixel_grid_x * tan_half_fov * aspect_ratio,
-            pixel_grid_y * tan_half_fov,
-            np.ones_like(pixel_grid_x),
-        ],
-        axis=-1,
+    cam_to_world = torch.as_tensor(
+        camera_state.cam_to_world,
+        device=device,
+        dtype=torch.float32,
     )
-    camera_dirs /= np.linalg.norm(camera_dirs, axis=-1, keepdims=True)
+    focal_length = 0.5 * height / torch.tan(
+        torch.deg2rad(torch.tensor(camera_state.fov_degrees, device=device))
+        / 2.0
+    )
+    intrinsics = torch.eye(3, device=device, dtype=torch.float32)
+    intrinsics[0, 0] = focal_length
+    intrinsics[1, 1] = focal_length
+    intrinsics[0, 2] = width / 2.0
+    intrinsics[1, 2] = height / 2.0
 
-    world_dirs = np.einsum("ij,hwj->hwi", cam_to_world[:3, :3], camera_dirs)
-    return ((world_dirs + 1.0) / 2.0 * 255.0).astype(np.uint8)
+    pixel_x, pixel_y = torch.meshgrid(
+        torch.arange(width, device=device, dtype=torch.float32),
+        torch.arange(height, device=device, dtype=torch.float32),
+        indexing="xy",
+    )
+    pixel_centers = torch.stack((pixel_x, pixel_y), dim=-1) + 0.5
+    homogeneous_pixels = torch.nn.functional.pad(pixel_centers, (0, 1), value=1.0)
+    camera_dirs = torch.einsum(
+        "ij,hwj->hwi",
+        torch.linalg.inv(intrinsics),
+        homogeneous_pixels,
+    )
+    world_dirs = torch.einsum("ij,hwj->hwi", cam_to_world[:3, :3], camera_dirs)
+    world_dirs = world_dirs / torch.linalg.norm(world_dirs, dim=-1, keepdim=True)
+    return (((world_dirs + 1.0) / 2.0) * 255.0).to(torch.uint8)
 
 
 viewer = native_viewer(render_fn, aspect_ratio=16.3 / 9)
@@ -125,9 +135,9 @@ do not pass them into `native_viewer()`. Use `aspect_ratio=` to control the
 initial layout, which defaults to `16.3 / 9`.
 
 The native viewer currently defaults to OpenCV convention, exposed as
-`camera_convention="opencv"`. Other conventions can be declared in the state so
-the contract is explicit, but the viewer controls do not yet reinterpret camera
-axes differently per convention.
+`camera_convention="opencv"`. The widget converts between `opencv`, `opengl`,
+`blender`, and `colmap` conventions at the viewer boundary so the Python
+callback sees a `cam_to_world` matrix consistent with the declared convention.
 
 The widget also exposes the last primary-button click through
 `viewer.last_click` / `viewer.get_last_click()`. Dragging or panning does not

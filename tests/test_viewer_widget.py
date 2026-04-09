@@ -222,9 +222,13 @@ def test_latest_only_renderer_drops_stale_results() -> None:
         )
 
     def publish_frame(
-        revision: int, camera_state: CameraState, frame: np.ndarray
+        revision: int,
+        camera_state: CameraState,
+        frame: np.ndarray,
+        render_time_ms: float,
     ) -> None:
         del frame
+        assert render_time_ms >= 0.0
         published.append((revision, camera_state.width))
 
     renderer = _LatestOnlyRenderer(

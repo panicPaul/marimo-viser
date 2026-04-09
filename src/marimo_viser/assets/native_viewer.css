@@ -31,10 +31,7 @@
   position: absolute;
   left: 12px;
   top: 12px;
-  right: 12px;
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
+  display: block;
   pointer-events: none;
   font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
   color: #0f172a;
@@ -49,17 +46,8 @@
   white-space: pre-wrap;
 }
 
-.native-viewer-error {
-  color: #7f1d1d;
-  max-width: min(520px, 80%);
-  background: rgba(254, 242, 242, 0.92);
-}
-
-.native-viewer-debug {
-  max-width: min(640px, 90%);
-  font-size: 11px;
-  line-height: 1.35;
-  white-space: pre-wrap;
+.native-viewer-latency {
+  white-space: nowrap;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -82,10 +70,5 @@
   .native-viewer-badge {
     background: rgba(15, 23, 42, 0.76);
     border-color: rgba(148, 163, 184, 0.22);
-  }
-
-  .native-viewer-error {
-    color: #fecaca;
-    background: rgba(69, 10, 10, 0.85);
   }
 }

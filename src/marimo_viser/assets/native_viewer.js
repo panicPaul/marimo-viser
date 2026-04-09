@@ -149,12 +149,15 @@ function render({ model, el }) {
   const root = document.createElement("div");
   root.className = "native-viewer-root";
 
-  const frame = document.createElement("img");
+  const frame = document.createElement("canvas");
   frame.className = "native-viewer-frame";
   frame.tabIndex = 0;
-  frame.alt = "Native 3D viewer";
-  frame.draggable = false;
+  frame.setAttribute("aria-label", "Native 3D viewer");
   root.appendChild(frame);
+  const frameContext = frame.getContext("2d");
+  if (frameContext === null) {
+    throw new Error("Failed to acquire 2D canvas context.");
+  }
 
   const overlay = document.createElement("div");
   overlay.className = "native-viewer-overlay";
@@ -180,12 +183,15 @@ function render({ model, el }) {
   let lastTickMs = null;
   const pressedKeys = new Set();
   const clickThresholdPixels = 4.0;
-  let currentFrameUrl = "";
   let lastFrameRevision = -1;
   let averageLatencyMs = null;
   let lastLatencySampleAtMs = null;
   let lastRenderTimeMs = null;
   const revisionSentAtMs = new Map();
+  let latestScheduledFrameRevision = -1;
+  let interactionActive = Boolean(model.get("interaction_active"));
+  let settleTimeoutId = null;
+  const settleDelayMs = 150;
 
   function updateAspectRatio() {
     const explicitAspectRatio = Number(model.get("aspect_ratio"));
@@ -264,6 +270,43 @@ function render({ model, el }) {
     revisionSentAtMs.set(nextRevision, performance.now());
     model.set("camera_state_json", nextJson);
     model.set("_camera_revision", nextRevision);
+    model.save_changes();
+  }
+
+  function requestSettledRender() {
+    const nextRevision = model.get("_camera_revision") + 1;
+    revisionSentAtMs.set(nextRevision, performance.now());
+    model.set("interaction_active", false);
+    model.set("_camera_revision", nextRevision);
+    model.save_changes();
+    interactionActive = false;
+  }
+
+  function scheduleSettledRender() {
+    if (settleTimeoutId !== null) {
+      clearTimeout(settleTimeoutId);
+    }
+    settleTimeoutId = setTimeout(() => {
+      settleTimeoutId = null;
+      if (interaction !== null || pressedKeys.size > 0) {
+        return;
+      }
+      if (interactionActive) {
+        requestSettledRender();
+      }
+    }, settleDelayMs);
+  }
+
+  function markInteractionActive() {
+    if (settleTimeoutId !== null) {
+      clearTimeout(settleTimeoutId);
+      settleTimeoutId = null;
+    }
+    if (interactionActive) {
+      return;
+    }
+    interactionActive = true;
+    model.set("interaction_active", true);
     model.save_changes();
   }
 
@@ -352,13 +395,8 @@ function render({ model, el }) {
     }
   }
 
-  function setFrameFromBlob(blob, revision, renderTimeMs) {
-    if (currentFrameUrl) {
-      URL.revokeObjectURL(currentFrameUrl);
-    }
-    currentFrameUrl = URL.createObjectURL(blob);
+  function registerFrameMetrics(revision, renderTimeMs) {
     lastFrameRevision = revision;
-    frame.src = currentFrameUrl;
     const sentAtMs = revisionSentAtMs.get(revision);
     if (sentAtMs !== undefined) {
       const now = performance.now();
@@ -383,12 +421,21 @@ function render({ model, el }) {
     updateLatencyBadge();
   }
 
-  frame.addEventListener("load", () => {});
-
-  frame.addEventListener("error", () => {
-    model.set("error_text", `Image decode failed: revision=${lastFrameRevision}`);
-    model.save_changes();
-  });
+  async function drawFrame(bytes, width, height, revision, renderTimeMs, mimeType) {
+    latestScheduledFrameRevision = Math.max(latestScheduledFrameRevision, revision);
+    const blob = new Blob([bytes], { type: mimeType || "image/jpeg" });
+    const bitmap = await createImageBitmap(blob);
+    if (revision < latestScheduledFrameRevision || revision < lastFrameRevision) {
+      bitmap.close();
+      return;
+    }
+    frame.width = width;
+    frame.height = height;
+    frameContext.clearRect(0, 0, width, height);
+    frameContext.drawImage(bitmap, 0, 0, width, height);
+    bitmap.close();
+    registerFrameMetrics(revision, renderTimeMs);
+  }
 
   function applyCameraStateJson() {
     const incoming = model.get("camera_state_json");
@@ -407,6 +454,7 @@ function render({ model, el }) {
   });
 
   frame.addEventListener("pointerdown", (event) => {
+    markInteractionActive();
     frame.focus();
     frame.setPointerCapture(event.pointerId);
     interaction = {
@@ -484,6 +532,7 @@ function render({ model, el }) {
     frame.releasePointerCapture(event.pointerId);
     interaction = null;
     frame.classList.remove("is-dragging");
+    scheduleSettledRender();
   }
 
   frame.addEventListener("pointerup", endInteraction);
@@ -493,8 +542,10 @@ function render({ model, el }) {
     "wheel",
     (event) => {
       event.preventDefault();
+      markInteractionActive();
       dolly(event.deltaY);
       pushCameraState();
+      scheduleSettledRender();
     },
     { passive: false },
   );
@@ -505,16 +556,21 @@ function render({ model, el }) {
       return;
     }
     event.preventDefault();
+    markInteractionActive();
     pressedKeys.add(key);
     ensureKeyboardLoop();
   });
 
   frame.addEventListener("keyup", (event) => {
     pressedKeys.delete(event.key.toLowerCase());
+    if (pressedKeys.size === 0) {
+      scheduleSettledRender();
+    }
   });
 
   frame.addEventListener("blur", () => {
     pressedKeys.clear();
+    scheduleSettledRender();
   });
 
   const resizeObserver = new ResizeObserver(() => {
@@ -535,12 +591,23 @@ function render({ model, el }) {
     if (bytes === null) {
       return;
     }
-    const blob = new Blob([bytes], { type: content.mime_type || "image/jpeg" });
-    setFrameFromBlob(blob, content.revision ?? -1, content.render_time_ms);
+    void drawFrame(
+      bytes,
+      content.width ?? 0,
+      content.height ?? 0,
+      content.revision ?? -1,
+      content.render_time_ms,
+      content.mime_type,
+    );
+  };
+
+  const onInteractionActiveChange = () => {
+    interactionActive = Boolean(model.get("interaction_active"));
   };
 
   model.on("change:camera_state_json", onCameraChange);
   model.on("change:aspect_ratio", onAspectRatioChange);
+  model.on("change:interaction_active", onInteractionActiveChange);
   model.on("msg:custom", onCustomMessage);
 
   updateAspectRatio();
@@ -552,12 +619,13 @@ function render({ model, el }) {
     if (animationFrame !== null) {
       cancelAnimationFrame(animationFrame);
     }
-    if (currentFrameUrl) {
-      URL.revokeObjectURL(currentFrameUrl);
-    }
     model.off("change:camera_state_json", onCameraChange);
     model.off("change:aspect_ratio", onAspectRatioChange);
+    model.off("change:interaction_active", onInteractionActiveChange);
     model.off("msg:custom", onCustomMessage);
+    if (settleTimeoutId !== null) {
+      clearTimeout(settleTimeoutId);
+    }
   };
 }
 

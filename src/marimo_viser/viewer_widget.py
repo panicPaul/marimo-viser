@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import io
 import json
 import threading
 import time
@@ -447,7 +446,9 @@ class _LatestOnlyRenderer:
     def __init__(
         self,
         render_fn: Callable[[CameraState], np.ndarray | torch.Tensor],
-        publish_frame: Callable[[int, CameraState, np.ndarray, float], None],
+        publish_frame: Callable[
+            [int, CameraState, np.ndarray, float, bool], None
+        ],
         publish_error: Callable[[int, str], None],
         set_rendering: Callable[[bool], None],
     ) -> None:
@@ -459,15 +460,19 @@ class _LatestOnlyRenderer:
         self._latest_revision = -1
         self._pending_revision = -1
         self._pending_state: CameraState | None = None
+        self._pending_interaction_active = False
         self._worker = threading.Thread(target=self._run, daemon=True)
         self._worker.start()
 
-    def request(self, revision: int, camera_state: CameraState) -> None:
+    def request(
+        self, revision: int, camera_state: CameraState, interaction_active: bool
+    ) -> None:
         """Request a render for the most recent camera state."""
         with self._condition:
             self._latest_revision = revision
             self._pending_revision = revision
             self._pending_state = camera_state
+            self._pending_interaction_active = interaction_active
             self._set_rendering(True)
             self._condition.notify()
 
@@ -478,6 +483,7 @@ class _LatestOnlyRenderer:
                     self._condition.wait()
                 revision = self._pending_revision
                 camera_state = self._pending_state
+                interaction_active = self._pending_interaction_active
                 self._pending_state = None
 
             assert camera_state is not None
@@ -511,7 +517,11 @@ class _LatestOnlyRenderer:
 
             try:
                 self._publish_frame(
-                    revision, camera_state, frame, render_time_ms
+                    revision,
+                    camera_state,
+                    frame,
+                    render_time_ms,
+                    interaction_active,
                 )
             except Exception as exception:
                 message = "".join(
@@ -534,6 +544,7 @@ class _NativeViewerAnyWidget(anywidget.AnyWidget):
     camera_state_json = traitlets.Unicode("").tag(sync=True)
     aspect_ratio = traitlets.Float(16.3 / 9.0).tag(sync=True)
     _camera_revision = traitlets.Int(0).tag(sync=True)
+    interaction_active = traitlets.Bool(False).tag(sync=True)
     last_click_json = traitlets.Unicode("").tag(sync=True)
     is_rendering = traitlets.Bool(False).tag(sync=True)
     error_text = traitlets.Unicode("").tag(sync=True)
@@ -562,9 +573,11 @@ class NativeViewerWidget(_StableMarimoAnyWidget):
         self,
         anywidget_instance: _NativeViewerAnyWidget,
         render_fn: Callable[[CameraState], np.ndarray | torch.Tensor],
+        interactive_quality: int,
     ) -> None:
         super().__init__(anywidget_instance)
-        self._latest_frame_bytes: bytes | None = None
+        self._latest_frame_array: np.ndarray | None = None
+        self._interactive_quality = interactive_quality
         try:
             self._main_loop: asyncio.AbstractEventLoop | None = (
                 asyncio.get_running_loop()
@@ -614,11 +627,9 @@ class NativeViewerWidget(_StableMarimoAnyWidget):
 
     def get_snapshot(self) -> Image.Image:
         """Return the latest rendered frame as a PIL image."""
-        if self._latest_frame_bytes is None:
+        if self._latest_frame_array is None:
             raise RuntimeError("No rendered frame is available yet.")
-        image = Image.open(io.BytesIO(self._latest_frame_bytes))
-        image.load()
-        return image
+        return Image.fromarray(self._latest_frame_array.copy(), mode="RGB")
 
     def _run_on_main_loop(self, callback: Callable[[], None]) -> None:
         """Run a callback on the main asyncio loop when available."""
@@ -643,6 +654,7 @@ class NativeViewerWidget(_StableMarimoAnyWidget):
         self._renderer.request(
             self.widget._camera_revision,
             CameraState.from_json(self.widget.camera_state_json),
+            self.widget.interaction_active,
         )
 
     def _publish_frame(
@@ -651,11 +663,13 @@ class NativeViewerWidget(_StableMarimoAnyWidget):
         camera_state: CameraState,
         frame: np.ndarray,
         render_time_ms: float,
+        interaction_active: bool,
     ) -> None:
+        jpeg_quality = self._interactive_quality if interaction_active else 95
         success, encoded = cv2.imencode(
             ".jpg",
             cv2.cvtColor(frame, cv2.COLOR_RGB2BGR),
-            [int(cv2.IMWRITE_JPEG_QUALITY), 95],
+            [int(cv2.IMWRITE_JPEG_QUALITY), jpeg_quality],
         )
         if not success:
             raise RuntimeError("Failed to encode rendered frame as JPEG.")
@@ -672,7 +686,7 @@ class NativeViewerWidget(_StableMarimoAnyWidget):
             ).to_json()
 
         def _apply_frame_update() -> None:
-            self._latest_frame_bytes = encoded_bytes
+            self._latest_frame_array = frame.copy()
             self.widget.error_text = ""
             self.widget.send(
                 {
@@ -682,6 +696,7 @@ class NativeViewerWidget(_StableMarimoAnyWidget):
                     "height": frame_height,
                     "revision": revision,
                     "render_time_ms": render_time_ms,
+                    "interaction_active": interaction_active,
                 },
                 buffers=[encoded_bytes],
             )
@@ -714,6 +729,7 @@ def native_viewer(
     *,
     fov_degrees: float = 60.0,
     aspect_ratio: float = 16.3 / 9.0,
+    interactive_quality: int = 50,
     initial_view: CameraState | None = None,
 ) -> NativeViewerWidget:
     """Create a native image-based 3D viewer for marimo notebooks.
@@ -737,6 +753,11 @@ def native_viewer(
     """
     if aspect_ratio <= 0.0:
         raise ValueError(f"aspect_ratio must be positive, got {aspect_ratio}.")
+    if not 1 <= interactive_quality <= 100:
+        raise ValueError(
+            "interactive_quality must be in [1, 100], "
+            f"got {interactive_quality}."
+        )
     resolved_camera_state = initial_view or CameraState.default(
         fov_degrees=fov_degrees
     )
@@ -744,4 +765,8 @@ def native_viewer(
         camera_state=resolved_camera_state,
         aspect_ratio=aspect_ratio,
     )
-    return NativeViewerWidget(anywidget_instance, render_fn=render_fn)
+    return NativeViewerWidget(
+        anywidget_instance,
+        render_fn=render_fn,
+        interactive_quality=interactive_quality,
+    )

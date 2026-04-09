@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import io
 import threading
 import time
 from collections.abc import Callable
@@ -8,7 +7,6 @@ from collections.abc import Callable
 import numpy as np
 import pytest
 import torch
-from PIL import Image
 
 from marimo_viser import CameraState, ViewerClick, native_viewer
 from marimo_viser.viewer_widget import (
@@ -156,10 +154,11 @@ def test_native_viewer_get_snapshot_decodes_latest_frame() -> None:
     viewer = native_viewer(
         lambda state: np.zeros((state.height, state.width, 3), dtype=np.uint8)
     )
-    image = Image.new("RGB", (3, 2), color=(12, 34, 56))
-    buffer = io.BytesIO()
-    image.save(buffer, format="JPEG")
-    viewer._latest_frame_bytes = buffer.getvalue()
+    viewer._latest_frame_array = np.full(
+        (2, 3, 3),
+        fill_value=np.array([12, 34, 56], dtype=np.uint8),
+        dtype=np.uint8,
+    )
 
     snapshot = viewer.get_snapshot()
 
@@ -171,7 +170,7 @@ def test_native_viewer_get_snapshot_requires_available_frame() -> None:
     viewer = native_viewer(
         lambda state: np.zeros((state.height, state.width, 3), dtype=np.uint8)
     )
-    viewer._latest_frame_bytes = None
+    viewer._latest_frame_array = None
 
     with pytest.raises(
         RuntimeError, match="No rendered frame is available yet"
@@ -226,9 +225,11 @@ def test_latest_only_renderer_drops_stale_results() -> None:
         camera_state: CameraState,
         frame: np.ndarray,
         render_time_ms: float,
+        interaction_active: bool,
     ) -> None:
         del frame
         assert render_time_ms >= 0.0
+        assert isinstance(interaction_active, bool)
         published.append((revision, camera_state.width))
 
     renderer = _LatestOnlyRenderer(
@@ -238,9 +239,9 @@ def test_latest_only_renderer_drops_stale_results() -> None:
         set_rendering=lambda value: None,
     )
 
-    renderer.request(1, CameraState.default(width=10, height=4))
+    renderer.request(1, CameraState.default(width=10, height=4), True)
     assert started_first.wait(timeout=2.0)
-    renderer.request(2, CameraState.default(width=20, height=4))
+    renderer.request(2, CameraState.default(width=20, height=4), False)
     release_first.set()
 
     _wait_until(lambda: published == [(2, 20)])
@@ -287,4 +288,14 @@ def test_native_viewer_rejects_non_positive_aspect_ratio() -> None:
                 (state.height, state.width, 3), dtype=np.uint8
             ),
             aspect_ratio=0.0,
+        )
+
+
+def test_native_viewer_rejects_out_of_range_interactive_quality() -> None:
+    with pytest.raises(ValueError, match="interactive_quality must be in"):
+        native_viewer(
+            lambda state: np.zeros(
+                (state.height, state.width, 3), dtype=np.uint8
+            ),
+            interactive_quality=0,
         )

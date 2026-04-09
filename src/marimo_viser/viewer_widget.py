@@ -816,11 +816,13 @@ class NativeViewerWidget(_StableMarimoAnyWidget):
         anywidget_instance: _NativeViewerAnyWidget,
         render_fn: Callable[[CameraState], np.ndarray | torch.Tensor],
         interactive_quality: int,
+        interactive_scale: float | None,
         state: NativeViewerState | None,
     ) -> None:
         super().__init__(anywidget_instance)
         self._latest_frame_array: np.ndarray | None = None
         self._interactive_quality = interactive_quality
+        self._interactive_scale = interactive_scale
         self._state = state
         self._stream_server = _get_frame_stream_server()
         self._stream_path = anywidget_instance.stream_path
@@ -1010,11 +1012,33 @@ class NativeViewerWidget(_StableMarimoAnyWidget):
         self.widget.error_text = ""
         self.widget._camera_revision += 1
 
+    def _interactive_camera_state(
+        self, camera_state: CameraState
+    ) -> CameraState:
+        """Return a motion-time render state with downscaled dimensions."""
+        if self._interactive_scale is None or self._interactive_scale >= 1.0:
+            return camera_state
+        scaled_width = max(
+            1, round(camera_state.width * self._interactive_scale)
+        )
+        scaled_height = max(
+            1, round(camera_state.height * self._interactive_scale)
+        )
+        if (
+            scaled_width == camera_state.width
+            and scaled_height == camera_state.height
+        ):
+            return camera_state
+        return camera_state.with_size(scaled_width, scaled_height)
+
     def _on_camera_revision_change(self, change: dict[str, object]) -> None:
         del change
+        camera_state = CameraState.from_json(self.widget.camera_state_json)
+        if self.widget.interaction_active:
+            camera_state = self._interactive_camera_state(camera_state)
         self._renderer.request(
             self.widget._camera_revision,
-            CameraState.from_json(self.widget.camera_state_json),
+            camera_state,
             self.widget.interaction_active,
         )
 
@@ -1041,7 +1065,7 @@ class NativeViewerWidget(_StableMarimoAnyWidget):
         frame_width = int(frame.shape[1])
         frame_height = int(frame.shape[0])
         next_camera_state_json = None
-        if (
+        if not interaction_active and (
             camera_state.width != frame_width
             or camera_state.height != frame_height
         ):
@@ -1152,6 +1176,7 @@ def native_viewer(
     fov_degrees: float = 60.0,
     aspect_ratio: float = 16.3 / 9.0,
     interactive_quality: int = 50,
+    interactive_scale: float | None = None,
     initial_view: CameraState | None = None,
     state: NativeViewerState | None = None,
 ) -> NativeViewerWidget:
@@ -1163,7 +1188,9 @@ def native_viewer(
     initial camera pose, convention, and nominal viewport size before the
     widget measures the live layout. Reuse the same `state` object across
     reruns to persist the camera state and last click even when `render_fn`
-    is recreated.
+    is recreated. `interactive_scale` optionally downsamples motion renders
+    while keeping settled renders at full resolution; `None` and `1.0`
+    both disable motion downscaling.
 
     The returned widget exposes:
 
@@ -1182,6 +1209,11 @@ def native_viewer(
         raise ValueError(
             "interactive_quality must be in [1, 100], "
             f"got {interactive_quality}."
+        )
+    if interactive_scale is not None and not 0.0 < interactive_scale <= 1.0:
+        raise ValueError(
+            "interactive_scale must be None or in (0, 1], "
+            f"got {interactive_scale}."
         )
     resolved_camera_state = (
         state.camera_state
@@ -1203,5 +1235,6 @@ def native_viewer(
         anywidget_instance,
         render_fn=render_fn,
         interactive_quality=interactive_quality,
+        interactive_scale=interactive_scale,
         state=state,
     )

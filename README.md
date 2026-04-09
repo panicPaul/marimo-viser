@@ -163,6 +163,7 @@ viewer_state = NativeViewerState()
 viewer = native_viewer(
     render_fn,
     aspect_ratio=16.3 / 9,
+    interactive_scale=0.5,
     state=viewer_state,
 )
 viewer
@@ -182,6 +183,10 @@ initial layout, which defaults to `16.3 / 9`.
 
 If you want the view to survive reruns while `render_fn` changes, reuse the
 same `NativeViewerState` object and pass it with `state=...`.
+
+`interactive_scale=` can be used to downscale motion renders while keeping the
+settled frame at full resolution. `None` and `1.0` both disable the
+downscaling path.
 
 The native viewer currently defaults to OpenCV convention, exposed as
 `camera_convention="opencv"`. The widget converts between `opencv`, `opengl`,

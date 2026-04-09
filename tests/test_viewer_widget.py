@@ -350,6 +350,31 @@ def test_native_viewer_exposes_configured_aspect_ratio() -> None:
     assert viewer.anywidget().aspect_ratio == 2.0
 
 
+def test_native_viewer_downscales_motion_renders_only() -> None:
+    rendered_sizes: list[tuple[int, int, bool]] = []
+    viewer = native_viewer(
+        lambda state: (
+            rendered_sizes.append((state.width, state.height, True))
+            or np.zeros((state.height, state.width, 3), dtype=np.uint8)
+        ),
+        initial_view=CameraState.default(width=100, height=80),
+        interactive_scale=0.5,
+    )
+    viewer.anywidget().interaction_active = True
+
+    viewer.rerender()
+    _wait_until(lambda: len(rendered_sizes) >= 1)
+
+    viewer.anywidget().interaction_active = False
+    viewer.rerender()
+    _wait_until(lambda: len(rendered_sizes) >= 2)
+
+    assert rendered_sizes[0][:2] == (50, 40)
+    assert rendered_sizes[1][:2] == (100, 80)
+    assert viewer.get_camera_state().width == 100
+    assert viewer.get_camera_state().height == 80
+
+
 def test_native_viewer_render_errors_surface_in_widget_state() -> None:
     viewer = native_viewer(
         lambda state: (_ for _ in ()).throw(RuntimeError("boom")),
@@ -379,3 +404,24 @@ def test_native_viewer_rejects_out_of_range_interactive_quality() -> None:
             ),
             interactive_quality=0,
         )
+
+
+def test_native_viewer_rejects_out_of_range_interactive_scale() -> None:
+    with pytest.raises(
+        ValueError, match="interactive_scale must be None or in"
+    ):
+        native_viewer(
+            lambda state: np.zeros(
+                (state.height, state.width, 3), dtype=np.uint8
+            ),
+            interactive_scale=0.0,
+        )
+
+
+def test_native_viewer_accepts_none_interactive_scale() -> None:
+    viewer = native_viewer(
+        lambda state: np.zeros((state.height, state.width, 3), dtype=np.uint8),
+        interactive_scale=None,
+    )
+
+    assert viewer is not None

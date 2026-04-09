@@ -11,9 +11,18 @@ from marimo_viser.scene_normalization import (
     pca_transform_from_points,
     similarity_from_cameras,
 )
+from marimo_viser.viewer_widget import (
+    CameraState,
+    NativeViewerWidget,
+    ViewerClick,
+    native_viewer,
+)
 from marimo_viser.viser_widget import ViserMarimoWidget, viser_marimo
 
 __all__ = [
+    "CameraState",
+    "NativeViewerWidget",
+    "ViewerClick",
     "ViserMarimoWidget",
     "apply_rotation_to_quaternions",
     "apply_rotation_to_sh_coefficients",
@@ -23,6 +32,7 @@ __all__ = [
     "compose_transforms",
     "form_gui",
     "json_gui",
+    "native_viewer",
     "pca_transform_from_points",
     "similarity_from_cameras",
     "viser_marimo",

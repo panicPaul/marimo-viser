@@ -7,6 +7,7 @@ It gives you:
 
 - a marimo-reactive widget by default
 - optional `nerfview` render-loop integration
+- a native image-based viewer for custom renderers
 - explicit save/restore camera state controls
 - safer `render_fn` error handling in notebooks
 
@@ -72,6 +73,73 @@ widget
 
 The returned `widget` is already reactive in marimo, so downstream cells can
 depend on `widget.value`.
+
+Native viewer mode:
+
+```python
+import numpy as np
+
+from marimo_viser import CameraState, native_viewer
+
+
+def render_fn(camera_state: CameraState) -> np.ndarray:
+    width = camera_state.width
+    height = camera_state.height
+    cam_to_world = camera_state.cam_to_world
+    fov_radians = np.deg2rad(camera_state.fov_degrees)
+
+    x_coords = np.linspace(-1.0, 1.0, width, dtype=np.float32)
+    y_coords = np.linspace(1.0, -1.0, height, dtype=np.float32)
+    pixel_grid_x, pixel_grid_y = np.meshgrid(x_coords, y_coords, indexing="xy")
+    aspect_ratio = width / height
+    tan_half_fov = np.tan(fov_radians / 2.0)
+
+    camera_dirs = np.stack(
+        [
+            pixel_grid_x * tan_half_fov * aspect_ratio,
+            pixel_grid_y * tan_half_fov,
+            np.ones_like(pixel_grid_x),
+        ],
+        axis=-1,
+    )
+    camera_dirs /= np.linalg.norm(camera_dirs, axis=-1, keepdims=True)
+
+    world_dirs = np.einsum("ij,hwj->hwi", cam_to_world[:3, :3], camera_dirs)
+    return ((world_dirs + 1.0) / 2.0 * 255.0).astype(np.uint8)
+
+
+viewer = native_viewer(render_fn, aspect_ratio=16.3 / 9)
+viewer
+```
+
+The native viewer callback receives a typed `CameraState` with:
+
+- `fov_degrees`
+- `width`
+- `height`
+- `cam_to_world`
+- `camera_convention`, currently `Literal["opencv", "opengl", "blender", "colmap"]`
+
+`width` and `height` are measured from the rendered marimo widget size, so you
+do not pass them into `native_viewer()`. Use `aspect_ratio=` to control the
+initial layout, which defaults to `16.3 / 9`.
+
+The native viewer currently defaults to OpenCV convention, exposed as
+`camera_convention="opencv"`. Other conventions can be declared in the state so
+the contract is explicit, but the viewer controls do not yet reinterpret camera
+axes differently per convention.
+
+The widget also exposes the last primary-button click through
+`viewer.last_click` / `viewer.get_last_click()`. Dragging or panning does not
+register as a click.
+
+Controls:
+
+- left drag to orbit
+- right drag to pan
+- wheel to zoom
+- `WASD` to move
+- `Q` / `E` to move down / up
 
 ## Pydantic GUI
 

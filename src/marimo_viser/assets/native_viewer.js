@@ -1,0 +1,544 @@
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function normalize(vec) {
+  const length = Math.hypot(vec[0], vec[1], vec[2]);
+  if (length < 1e-8) {
+    return [0, 0, 1];
+  }
+  return [vec[0] / length, vec[1] / length, vec[2] / length];
+}
+
+function cross(a, b) {
+  return [
+    a[1] * b[2] - a[2] * b[1],
+    a[2] * b[0] - a[0] * b[2],
+    a[0] * b[1] - a[1] * b[0],
+  ];
+}
+
+function add(a, b) {
+  return [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+}
+
+function subtract(a, b) {
+  return [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+}
+
+function scale(vec, scalar) {
+  return [vec[0] * scalar, vec[1] * scalar, vec[2] * scalar];
+}
+
+function lookAtCamera(position, target, upDirection) {
+  let forward = normalize(subtract(target, position));
+  let right = cross(forward, upDirection);
+  if (Math.hypot(right[0], right[1], right[2]) < 1e-8) {
+    right = cross(forward, [0, 0, 1]);
+  }
+  right = normalize(right);
+  const up = normalize(cross(right, forward));
+  return [
+    [right[0], up[0], forward[0], position[0]],
+    [right[1], up[1], forward[1], position[1]],
+    [right[2], up[2], forward[2], position[2]],
+    [0, 0, 0, 1],
+  ];
+}
+
+function matrixColumn(matrix, index) {
+  return [matrix[0][index], matrix[1][index], matrix[2][index]];
+}
+
+function conventionRotation(cameraConvention) {
+  const rotations = {
+    opencv: [
+      [1, 0, 0],
+      [0, -1, 0],
+      [0, 0, 1],
+    ],
+    opengl: [
+      [1, 0, 0],
+      [0, 1, 0],
+      [0, 0, -1],
+    ],
+    blender: [
+      [1, 0, 0],
+      [0, 1, 0],
+      [0, 0, -1],
+    ],
+    colmap: [
+      [1, 0, 0],
+      [0, -1, 0],
+      [0, 0, 1],
+    ],
+  };
+  return rotations[cameraConvention] ?? rotations.opencv;
+}
+
+function multiplyMat3(a, b) {
+  const result = [
+    [0, 0, 0],
+    [0, 0, 0],
+    [0, 0, 0],
+  ];
+  for (let row = 0; row < 3; row += 1) {
+    for (let col = 0; col < 3; col += 1) {
+      let sum = 0;
+      for (let index = 0; index < 3; index += 1) {
+        sum += a[row][index] * b[index][col];
+      }
+      result[row][col] = sum;
+    }
+  }
+  return result;
+}
+
+function convertCamToWorldConvention(
+  camToWorld,
+  sourceConvention,
+  targetConvention,
+) {
+  const sourceTransform = conventionRotation(sourceConvention);
+  const targetTransform = conventionRotation(targetConvention);
+  const rotation = [
+    [camToWorld[0][0], camToWorld[0][1], camToWorld[0][2]],
+    [camToWorld[1][0], camToWorld[1][1], camToWorld[1][2]],
+    [camToWorld[2][0], camToWorld[2][1], camToWorld[2][2]],
+  ];
+  const internalRotation = multiplyMat3(rotation, sourceTransform);
+  const targetRotation = multiplyMat3(internalRotation, targetTransform);
+  return [
+    [targetRotation[0][0], targetRotation[0][1], targetRotation[0][2], camToWorld[0][3]],
+    [targetRotation[1][0], targetRotation[1][1], targetRotation[1][2], camToWorld[1][3]],
+    [targetRotation[2][0], targetRotation[2][1], targetRotation[2][2], camToWorld[2][3]],
+    [0, 0, 0, 1],
+  ];
+}
+
+function parseCameraState(cameraStateJson) {
+  const externalState = JSON.parse(cameraStateJson);
+  const convention = externalState.camera_convention ?? "opencv";
+  return {
+    fov_degrees: externalState.fov_degrees,
+    width: externalState.width,
+    height: externalState.height,
+    camera_convention: convention,
+    cam_to_world: convertCamToWorldConvention(
+      externalState.cam_to_world,
+      convention,
+      "opencv",
+    ),
+  };
+}
+
+function render({ model, el }) {
+  const root = document.createElement("div");
+  root.className = "native-viewer-root";
+
+  const frame = document.createElement("img");
+  frame.className = "native-viewer-frame";
+  frame.tabIndex = 0;
+  frame.alt = "Native 3D viewer";
+  frame.draggable = false;
+  root.appendChild(frame);
+
+  const overlay = document.createElement("div");
+  overlay.className = "native-viewer-overlay";
+
+  const statusBadge = document.createElement("div");
+  statusBadge.className = "native-viewer-badge";
+
+  const errorBadge = document.createElement("div");
+  errorBadge.className = "native-viewer-badge native-viewer-error";
+  errorBadge.hidden = true;
+
+  const debugBadge = document.createElement("div");
+  debugBadge.className = "native-viewer-badge native-viewer-debug";
+
+  overlay.appendChild(statusBadge);
+  overlay.appendChild(errorBadge);
+  overlay.appendChild(debugBadge);
+  root.appendChild(overlay);
+  el.appendChild(root);
+
+  let cameraState = parseCameraState(model.get("camera_state_json"));
+  let position = [
+    cameraState.cam_to_world[0][3],
+    cameraState.cam_to_world[1][3],
+    cameraState.cam_to_world[2][3],
+  ];
+  let target = add(position, scale(matrixColumn(cameraState.cam_to_world, 2), 3.0));
+  let orbitDistance = Math.max(1e-3, Math.hypot(...subtract(position, target)));
+  let interaction = null;
+  let animationFrame = null;
+  let lastTickMs = null;
+  const pressedKeys = new Set();
+  const clickThresholdPixels = 4.0;
+  let lastResolvedFrameUrl = "";
+  let lastImageEvent = "none";
+
+  function updateAspectRatio() {
+    const explicitAspectRatio = Number(model.get("aspect_ratio"));
+    const fallbackAspectRatio =
+      Math.max(1, cameraState.width) / Math.max(1, cameraState.height);
+    const aspectRatio =
+      Number.isFinite(explicitAspectRatio) && explicitAspectRatio > 0.0
+        ? explicitAspectRatio
+        : fallbackAspectRatio;
+    root.style.aspectRatio = `${aspectRatio}`;
+  }
+
+  function getViewportSize() {
+    const rect = root.getBoundingClientRect();
+    return {
+      width: Math.max(1, Math.round(rect.width || cameraState.width)),
+      height: Math.max(1, Math.round(rect.height || cameraState.height)),
+    };
+  }
+
+  function updateStatus() {
+    const renderingText = model.get("is_rendering") ? "rendering" : "idle";
+    statusBadge.textContent = `${model.get("controls_hint")}\nState: ${renderingText}`;
+
+    const errorText = model.get("error_text");
+    errorBadge.hidden = !errorText;
+    errorBadge.textContent = errorText;
+
+    debugBadge.textContent = [
+      `img.complete=${frame.complete}`,
+      `natural=${frame.naturalWidth}x${frame.naturalHeight}`,
+      `last_event=${lastImageEvent}`,
+      `frame_url=${lastResolvedFrameUrl || "(empty)"}`,
+    ].join("\n");
+  }
+
+  function updatePoseFromMatrix() {
+    position = [
+      cameraState.cam_to_world[0][3],
+      cameraState.cam_to_world[1][3],
+      cameraState.cam_to_world[2][3],
+    ];
+  }
+
+  function serializeCameraState() {
+    return JSON.stringify({
+      fov_degrees: cameraState.fov_degrees,
+      width: cameraState.width,
+      height: cameraState.height,
+      camera_convention: cameraState.camera_convention,
+      cam_to_world: convertCamToWorldConvention(
+        cameraState.cam_to_world,
+        "opencv",
+        cameraState.camera_convention,
+      ),
+    });
+  }
+
+  function updateCameraMatrix() {
+    cameraState.cam_to_world = lookAtCamera(position, target, [0, 1, 0]);
+  }
+
+  function syncSizeIntoCameraState() {
+    const viewport = getViewportSize();
+    cameraState.width = viewport.width;
+    cameraState.height = viewport.height;
+  }
+
+  function pushCameraState() {
+    syncSizeIntoCameraState();
+    updateCameraMatrix();
+    const nextJson = serializeCameraState();
+    if (nextJson === model.get("camera_state_json")) {
+      return;
+    }
+    model.set("camera_state_json", nextJson);
+    model.set("_camera_revision", model.get("_camera_revision") + 1);
+    model.save_changes();
+  }
+
+  function orbit(deltaX, deltaY) {
+    const rotationSpeed = 0.008;
+    const offset = subtract(position, target);
+    const radius = Math.max(1e-3, Math.hypot(...offset));
+    const yaw = Math.atan2(offset[0], offset[2]) - deltaX * rotationSpeed;
+    const pitch = clamp(
+      Math.atan2(offset[1], Math.hypot(offset[0], offset[2])) - deltaY * rotationSpeed,
+      -Math.PI / 2 + 1e-3,
+      Math.PI / 2 - 1e-3,
+    );
+    const cosPitch = Math.cos(pitch);
+    position = [
+      target[0] + radius * Math.sin(yaw) * cosPitch,
+      target[1] + radius * Math.sin(pitch),
+      target[2] + radius * Math.cos(yaw) * cosPitch,
+    ];
+    orbitDistance = radius;
+  }
+
+  function pan(deltaX, deltaY) {
+    const forward = normalize(subtract(target, position));
+    const right = normalize(cross(forward, [0, 1, 0]));
+    const up = normalize(cross(right, forward));
+    const scaleFactor =
+      Math.max(1e-3, orbitDistance) *
+      Math.tan((cameraState.fov_degrees * Math.PI / 180.0) / 2.0) /
+      Math.max(1, frame.getBoundingClientRect().height) *
+      2.0;
+    const translation = add(
+      scale(right, -deltaX * scaleFactor),
+      scale(up, deltaY * scaleFactor),
+    );
+    position = add(position, translation);
+    target = add(target, translation);
+  }
+
+  function dolly(deltaY) {
+    const zoomFactor = Math.exp(deltaY * 0.0015);
+    const offset = subtract(position, target);
+    orbitDistance = clamp(Math.hypot(...offset) * zoomFactor, 0.05, 1e5);
+    const direction = normalize(offset);
+    position = add(target, scale(direction, orbitDistance));
+  }
+
+  function stepKeyboard(deltaSeconds) {
+    if (pressedKeys.size === 0) {
+      return;
+    }
+    const forward = normalize(subtract(target, position));
+    const right = normalize(cross(forward, [0, 1, 0]));
+    const up = [0, 1, 0];
+    const speed = Math.max(0.05, orbitDistance * 0.8) * deltaSeconds;
+    let motion = [0, 0, 0];
+    if (pressedKeys.has("w")) motion = add(motion, scale(forward, speed));
+    if (pressedKeys.has("s")) motion = add(motion, scale(forward, -speed));
+    if (pressedKeys.has("a")) motion = add(motion, scale(right, -speed));
+    if (pressedKeys.has("d")) motion = add(motion, scale(right, speed));
+    if (pressedKeys.has("q")) motion = add(motion, scale(up, -speed));
+    if (pressedKeys.has("e")) motion = add(motion, scale(up, speed));
+    position = add(position, motion);
+    target = add(target, motion);
+    pushCameraState();
+  }
+
+  function tick(timestamp) {
+    if (lastTickMs === null) {
+      lastTickMs = timestamp;
+    }
+    const deltaSeconds = Math.min(0.05, (timestamp - lastTickMs) / 1000);
+    lastTickMs = timestamp;
+    stepKeyboard(deltaSeconds);
+    if (pressedKeys.size > 0) {
+      animationFrame = requestAnimationFrame(tick);
+    } else {
+      animationFrame = null;
+    }
+  }
+
+  function ensureKeyboardLoop() {
+    if (animationFrame === null) {
+      lastTickMs = null;
+      animationFrame = requestAnimationFrame(tick);
+    }
+  }
+
+  function drawFrame() {
+    const frameUrl = model.get("frame_url");
+    if (!frameUrl) {
+      lastResolvedFrameUrl = "";
+      lastImageEvent = "empty-url";
+      updateStatus();
+      return;
+    }
+    lastResolvedFrameUrl = new URL(frameUrl, window.location.href).toString();
+    lastImageEvent = "src-set";
+    frame.src = lastResolvedFrameUrl;
+    updateStatus();
+  }
+
+  frame.addEventListener("load", () => {
+    lastImageEvent = "load";
+    updateStatus();
+    if (model.get("error_text").startsWith("Image decode failed:")) {
+      model.set("error_text", "");
+      model.save_changes();
+    }
+  });
+
+  frame.addEventListener("error", () => {
+    lastImageEvent = "error";
+    updateStatus();
+    model.set("error_text", `Image decode failed: url=${lastResolvedFrameUrl}`);
+    model.save_changes();
+  });
+
+  function applyCameraStateJson() {
+    const incoming = model.get("camera_state_json");
+    if (incoming === serializeCameraState()) {
+      return;
+    }
+    cameraState = parseCameraState(incoming);
+    updatePoseFromMatrix();
+    updateAspectRatio();
+    const forward = matrixColumn(cameraState.cam_to_world, 2);
+    target = add(position, scale(forward, orbitDistance));
+  }
+
+  frame.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+  });
+
+  frame.addEventListener("pointerdown", (event) => {
+    frame.focus();
+    frame.setPointerCapture(event.pointerId);
+    interaction = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      lastX: event.clientX,
+      lastY: event.clientY,
+      button: event.button,
+      moved: false,
+      mode: event.button === 2 ? "pan" : "orbit",
+    };
+    frame.classList.add("is-dragging");
+  });
+
+  frame.addEventListener("pointermove", (event) => {
+    if (!interaction || interaction.pointerId !== event.pointerId) {
+      return;
+    }
+    const deltaX = event.clientX - interaction.lastX;
+    const deltaY = event.clientY - interaction.lastY;
+    const dragDistance = Math.hypot(
+      event.clientX - interaction.startX,
+      event.clientY - interaction.startY,
+    );
+    if (dragDistance > clickThresholdPixels) {
+      interaction.moved = true;
+    }
+    interaction.lastX = event.clientX;
+    interaction.lastY = event.clientY;
+    if (interaction.mode === "orbit") {
+      orbit(deltaX, deltaY);
+    } else {
+      pan(deltaX, deltaY);
+    }
+    pushCameraState();
+  });
+
+  function endInteraction(event) {
+    if (!interaction || interaction.pointerId !== event.pointerId) {
+      return;
+    }
+    const shouldRegisterClick =
+      interaction.button === 0 && !interaction.moved;
+    if (shouldRegisterClick) {
+      const rect = frame.getBoundingClientRect();
+      const normalizedX = rect.width > 0
+        ? (event.clientX - rect.left) / rect.width
+        : 0.0;
+      const normalizedY = rect.height > 0
+        ? (event.clientY - rect.top) / rect.height
+        : 0.0;
+      const clickPayload = {
+        x: Math.max(
+          0,
+          Math.min(
+            cameraState.width - 1,
+            Math.floor(normalizedX * cameraState.width),
+          ),
+        ),
+        y: Math.max(
+          0,
+          Math.min(
+            cameraState.height - 1,
+            Math.floor(normalizedY * cameraState.height),
+          ),
+        ),
+        width: cameraState.width,
+        height: cameraState.height,
+        camera_state: JSON.parse(serializeCameraState()),
+      };
+      model.set("last_click_json", JSON.stringify(clickPayload));
+      model.save_changes();
+    }
+    frame.releasePointerCapture(event.pointerId);
+    interaction = null;
+    frame.classList.remove("is-dragging");
+  }
+
+  frame.addEventListener("pointerup", endInteraction);
+  frame.addEventListener("pointercancel", endInteraction);
+
+  frame.addEventListener(
+    "wheel",
+    (event) => {
+      event.preventDefault();
+      dolly(event.deltaY);
+      pushCameraState();
+    },
+    { passive: false },
+  );
+
+  frame.addEventListener("keydown", (event) => {
+    const key = event.key.toLowerCase();
+    if (!["w", "a", "s", "d", "q", "e"].includes(key)) {
+      return;
+    }
+    event.preventDefault();
+    pressedKeys.add(key);
+    ensureKeyboardLoop();
+  });
+
+  frame.addEventListener("keyup", (event) => {
+    pressedKeys.delete(event.key.toLowerCase());
+  });
+
+  frame.addEventListener("blur", () => {
+    pressedKeys.clear();
+  });
+
+  const resizeObserver = new ResizeObserver(() => {
+    pushCameraState();
+  });
+  resizeObserver.observe(root);
+
+  const onFrameChange = () => drawFrame();
+  const onStatusChange = () => updateStatus();
+  const onCameraChange = () => applyCameraStateJson();
+  const onAspectRatioChange = () => {
+    updateAspectRatio();
+    pushCameraState();
+  };
+
+  model.on("change:frame_url", onFrameChange);
+  model.on("change:_frame_revision", onFrameChange);
+  model.on("change:is_rendering", onStatusChange);
+  model.on("change:error_text", onStatusChange);
+  model.on("change:camera_state_json", onCameraChange);
+  model.on("change:aspect_ratio", onAspectRatioChange);
+
+  updateAspectRatio();
+  updateStatus();
+  pushCameraState();
+  drawFrame();
+
+  return () => {
+    resizeObserver.disconnect();
+    if (animationFrame !== null) {
+      cancelAnimationFrame(animationFrame);
+    }
+    model.off("change:frame_url", onFrameChange);
+    model.off("change:_frame_revision", onFrameChange);
+    model.off("change:is_rendering", onStatusChange);
+    model.off("change:error_text", onStatusChange);
+    model.off("change:camera_state_json", onCameraChange);
+    model.off("change:aspect_ratio", onAspectRatioChange);
+  };
+}
+
+const widget = { render };
+
+export { render };
+export default widget;

@@ -522,6 +522,9 @@ function render({ model, el }) {
     const shouldReset =
       lastLatencySampleAtMs === null
       || decodeEnqueueAt - lastLatencySampleAtMs > 1000.0;
+    if (revision < latestScheduledFrameRevision || revision < lastFrameRevision) {
+      return;
+    }
     const blob = new Blob([bytes], { type: mimeType || "image/jpeg" });
     const decodeStartedAt = performance.now();
     const bitmap = await createImageBitmap(blob);

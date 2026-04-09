@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import contextlib
 import json
 import secrets
 import socket
@@ -11,7 +12,7 @@ import threading
 import time
 import traceback
 from collections.abc import Callable, Iterator, MutableMapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
@@ -60,16 +61,54 @@ def _find_free_port(start: int = 8765, attempts: int = 64) -> int:
 
 
 @dataclass
+class _ClientSender:
+    """Latest-only async sender for one WebSocket client."""
+
+    websocket: WebSocket
+    _packet: bytes | None = field(default=None, repr=False)
+    _event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+    _task: asyncio.Task[None] | None = field(default=None, repr=False)
+
+    def push(self, packet: bytes) -> None:
+        """Replace the pending packet and wake the sender task."""
+        self._packet = packet
+        self._event.set()
+
+    def start(self) -> None:
+        """Start the background sender task."""
+        self._task = asyncio.ensure_future(self._run())
+
+    async def stop(self) -> None:
+        """Cancel the sender task and wait for it to finish."""
+        if self._task is not None:
+            self._task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._task
+
+    async def _run(self) -> None:
+        while True:
+            await self._event.wait()
+            self._event.clear()
+            packet = self._packet
+            if packet is None:
+                continue
+            try:
+                await self.websocket.send_bytes(packet)
+            except Exception:
+                return
+
+
+@dataclass
 class _FrameStreamState:
     """Mutable per-viewer stream state for the local websocket server."""
 
     token: str
     latest_packet: bytes | None = None
-    clients: set[WebSocket] | None = None
+    senders: dict[WebSocket, _ClientSender] | None = None
 
     def __post_init__(self) -> None:
-        if self.clients is None:
-            self.clients = set()
+        if self.senders is None:
+            self.senders = {}
 
 
 class _FrameStreamServer:
@@ -120,11 +159,13 @@ class _FrameStreamServer:
 
         await websocket.accept()
         assert stream_state is not None
+        sender = _ClientSender(websocket=websocket)
+        sender.start()
         with self._lock:
-            stream_state.clients.add(websocket)
+            stream_state.senders[websocket] = sender
             latest_packet = stream_state.latest_packet
         if latest_packet is not None:
-            await websocket.send_bytes(latest_packet)
+            sender.push(latest_packet)
 
         try:
             while True:
@@ -161,7 +202,8 @@ class _FrameStreamServer:
             with self._lock:
                 active_stream = self._streams.get(stream_id)
                 if active_stream is not None:
-                    active_stream.clients.discard(websocket)
+                    active_stream.senders.pop(websocket, None)
+            await sender.stop()
 
     def register_stream(self) -> tuple[str, str]:
         """Create a new stream and return `(stream_id, token)`."""
@@ -190,19 +232,13 @@ class _FrameStreamServer:
         started_at = time.perf_counter()
         with self._lock:
             stream_state = self._streams.get(stream_id)
-            clients = [] if stream_state is None else list(stream_state.clients)
-        stale_clients: list[WebSocket] = []
-        for websocket in clients:
-            try:
-                await websocket.send_bytes(packet)
-            except Exception:
-                stale_clients.append(websocket)
-        if stale_clients:
-            with self._lock:
-                stream_state = self._streams.get(stream_id)
-                if stream_state is not None:
-                    for websocket in stale_clients:
-                        stream_state.clients.discard(websocket)
+            senders = (
+                []
+                if stream_state is None
+                else list(stream_state.senders.values())
+            )
+        for sender in senders:
+            sender.push(packet)
         finished_at = time.perf_counter()
         return {
             "stream_queue_time_ms": (started_at - scheduled_at) * 1000.0,
@@ -729,8 +765,11 @@ class _LatestOnlyRenderer:
 
             with self._condition:
                 is_latest = revision == self._latest_revision
+                superseded_by_interaction = (
+                    not interaction_active and self._pending_interaction_active
+                )
 
-            if not is_latest:
+            if not is_latest or superseded_by_interaction:
                 continue
 
             try:
@@ -765,6 +804,7 @@ class _NativeViewerAnyWidget(anywidget.AnyWidget):
     stream_port = traitlets.Int(0).tag(sync=True)
     stream_path = traitlets.Unicode("").tag(sync=True)
     stream_token = traitlets.Unicode("").tag(sync=True)
+    transport_mode = traitlets.Unicode("websocket").tag(sync=True)
     _camera_revision = traitlets.Int(0).tag(sync=True)
     interaction_active = traitlets.Bool(False).tag(sync=True)
     latency_ms = traitlets.Float(0.0).tag(sync=True)
@@ -816,12 +856,14 @@ class NativeViewerWidget(_StableMarimoAnyWidget):
         anywidget_instance: _NativeViewerAnyWidget,
         render_fn: Callable[[CameraState], np.ndarray | torch.Tensor],
         interactive_quality: int,
+        settled_quality: Literal["jpeg_95", "jpeg_100", "png"],
         interactive_scale: float | None,
         state: NativeViewerState | None,
     ) -> None:
         super().__init__(anywidget_instance)
         self._latest_frame_array: np.ndarray | None = None
         self._interactive_quality = interactive_quality
+        self._settled_quality = settled_quality
         self._interactive_scale = interactive_scale
         self._state = state
         self._stream_server = _get_frame_stream_server()
@@ -1051,15 +1093,46 @@ class NativeViewerWidget(_StableMarimoAnyWidget):
         render_time_ms: float,
         interaction_active: bool,
     ) -> None:
-        jpeg_quality = self._interactive_quality if interaction_active else 95
         encode_started_at = time.perf_counter()
-        success, encoded = cv2.imencode(
-            ".jpg",
-            cv2.cvtColor(frame, cv2.COLOR_RGB2BGR),
-            [int(cv2.IMWRITE_JPEG_QUALITY), jpeg_quality],
-        )
-        if not success:
-            raise RuntimeError("Failed to encode rendered frame as JPEG.")
+        bgr_frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        if interaction_active:
+            success, encoded = cv2.imencode(
+                ".jpg",
+                bgr_frame,
+                [int(cv2.IMWRITE_JPEG_QUALITY), self._interactive_quality],
+            )
+            if not success:
+                raise RuntimeError("Failed to encode rendered frame as JPEG.")
+            mime_type = "image/jpeg"
+        else:
+            match self._settled_quality:
+                case "png":
+                    success, encoded = cv2.imencode(
+                        ".png", bgr_frame, [int(cv2.IMWRITE_PNG_COMPRESSION), 1]
+                    )
+                    if not success:
+                        raise RuntimeError(
+                            "Failed to encode rendered frame as PNG."
+                        )
+                    mime_type = "image/png"
+                case "jpeg_95":
+                    success, encoded = cv2.imencode(
+                        ".jpg", bgr_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 95]
+                    )
+                    if not success:
+                        raise RuntimeError(
+                            "Failed to encode rendered frame as JPEG."
+                        )
+                    mime_type = "image/jpeg"
+                case "jpeg_100":
+                    success, encoded = cv2.imencode(
+                        ".jpg", bgr_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 100]
+                    )
+                    if not success:
+                        raise RuntimeError(
+                            "Failed to encode rendered frame as JPEG."
+                        )
+                    mime_type = "image/jpeg"
         encode_time_ms = (time.perf_counter() - encode_started_at) * 1000.0
         encoded_bytes = encoded.tobytes()
         frame_width = int(frame.shape[1])
@@ -1077,7 +1150,7 @@ class NativeViewerWidget(_StableMarimoAnyWidget):
         packet = _pack_frame_packet(
             {
                 "type": "frame",
-                "mime_type": "image/jpeg",
+                "mime_type": mime_type,
                 "width": frame_width,
                 "height": frame_height,
                 "revision": revision,
@@ -1173,24 +1246,23 @@ class NativeViewerWidget(_StableMarimoAnyWidget):
 def native_viewer(
     render_fn: Callable[[CameraState], np.ndarray | torch.Tensor],
     *,
-    fov_degrees: float = 60.0,
     aspect_ratio: float = 16.3 / 9.0,
     interactive_quality: int = 50,
+    settled_quality: Literal["jpeg_95", "jpeg_100", "png"] = "jpeg_100",
     interactive_scale: float | None = None,
     initial_view: CameraState | None = None,
     state: NativeViewerState | None = None,
 ) -> NativeViewerWidget:
     """Create a native image-based 3D viewer for marimo notebooks.
 
-    The field of view is expressed in degrees. The render size comes from the
-    measured notebook layout. `aspect_ratio` controls the initial widget height
-    before the first render and resize measurement. `initial_view` sets the
-    initial camera pose, convention, and nominal viewport size before the
-    widget measures the live layout. Reuse the same `state` object across
-    reruns to persist the camera state and last click even when `render_fn`
-    is recreated. `interactive_scale` optionally downsamples motion renders
-    while keeping settled renders at full resolution; `None` and `1.0`
-    both disable motion downscaling.
+    The render size comes from the measured notebook layout. `aspect_ratio`
+    controls the initial widget height before the first render and resize
+    measurement. `initial_view` sets the initial camera pose, FOV, convention,
+    and nominal viewport size before the widget measures the live layout. Reuse
+    the same `state` object across reruns to persist the camera state and last
+    click even when `render_fn` is recreated. `interactive_scale` optionally
+    downsamples motion renders while keeping settled renders at full resolution;
+    `None` and `1.0` both disable motion downscaling.
 
     The returned widget exposes:
 
@@ -1218,7 +1290,7 @@ def native_viewer(
     resolved_camera_state = (
         state.camera_state
         if state is not None
-        else initial_view or CameraState.default(fov_degrees=fov_degrees)
+        else initial_view or CameraState.default()
     )
     stream_server = _get_frame_stream_server()
     stream_id, stream_token = stream_server.register_stream()
@@ -1235,6 +1307,7 @@ def native_viewer(
         anywidget_instance,
         render_fn=render_fn,
         interactive_quality=interactive_quality,
+        settled_quality=settled_quality,
         interactive_scale=interactive_scale,
         state=state,
     )

@@ -3,6 +3,7 @@ __pycache__/
 *.py[codz]
 *$py.class
 point_cloud.ply
+point_cloud_large.ply
 
 # C extensions
 *.so

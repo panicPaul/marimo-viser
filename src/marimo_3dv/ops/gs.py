@@ -8,6 +8,7 @@ stage for per-splat diagnostic overlays.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
@@ -32,8 +33,18 @@ class SplatRenderData(Protocol):
         ...
 
     @property
+    def center_positions(self) -> torch.Tensor:
+        """(N, 3) splat centers in world space."""
+        ...
+
+    @property
     def log_half_extents(self) -> torch.Tensor:
         """(N, 3) log-scale half-extents."""
+        ...
+
+    @property
+    def quaternion_orientation(self) -> torch.Tensor:
+        """(N, 4) splat orientations."""
         ...
 
     @property
@@ -45,6 +56,92 @@ class SplatRenderData(Protocol):
     def sh_degree(self) -> int:
         """Maximum SH degree present in the data."""
         ...
+
+
+@dataclass
+class _PreparedSplatRenderData:
+    """Mutable prepared GS render data reused across frames."""
+
+    center_positions: torch.Tensor | None
+    log_half_extents: torch.Tensor
+    quaternion_orientation: torch.Tensor | None
+    spherical_harmonics: torch.Tensor
+    opacity_logits: torch.Tensor
+    sh_degree: int
+    extra_fields: dict[str, Any] = field(default_factory=dict)
+
+    def __getattr__(self, name: str) -> Any:
+        if name in self.extra_fields:
+            return self.extra_fields[name]
+        raise AttributeError(name)
+
+    def apply_mask(self, keep: torch.Tensor) -> _PreparedSplatRenderData:
+        """Filter all splat-aligned fields in place."""
+        if self.center_positions is not None:
+            self.center_positions = self.center_positions[keep]
+        self.log_half_extents = self.log_half_extents[keep]
+        if self.quaternion_orientation is not None:
+            self.quaternion_orientation = self.quaternion_orientation[keep]
+        self.spherical_harmonics = self.spherical_harmonics[keep]
+        self.opacity_logits = self.opacity_logits[keep]
+        for field_name, field_value in list(self.extra_fields.items()):
+            if (
+                isinstance(field_value, torch.Tensor)
+                and field_value.ndim > 0
+                and field_value.shape[0] == keep.shape[0]
+            ):
+                self.extra_fields[field_name] = field_value[keep]
+        return self
+
+    def cap_sh_degree(self, degree: int) -> _PreparedSplatRenderData:
+        """Trim SH coefficients in place to the requested degree."""
+        active_degree = min(degree, self.sh_degree)
+        num_bases = (active_degree + 1) ** 2
+        self.spherical_harmonics = self.spherical_harmonics[:, :num_bases, :]
+        self.sh_degree = active_degree
+        return self
+
+
+def _clone_value(value: Any) -> Any:
+    """Clone tensor values for prepared render data, reuse other objects."""
+    if isinstance(value, torch.Tensor):
+        return value.clone()
+    return value
+
+
+def _prepare_splat_render_data(
+    render_data: SplatRenderData,
+) -> _PreparedSplatRenderData:
+    """Materialize one mutable GS render-data copy for prepare-stage ops."""
+    if isinstance(render_data, _PreparedSplatRenderData):
+        return render_data
+
+    known_names = {
+        "center_positions",
+        "log_half_extents",
+        "quaternion_orientation",
+        "spherical_harmonics",
+        "opacity_logits",
+        "sh_degree",
+    }
+    extra_fields = {
+        name: _clone_value(value)
+        for name, value in vars(render_data).items()
+        if name not in known_names
+    }
+    return _PreparedSplatRenderData(
+        center_positions=_clone_value(
+            getattr(render_data, "center_positions", None)
+        ),
+        log_half_extents=render_data.log_half_extents.clone(),
+        quaternion_orientation=_clone_value(
+            getattr(render_data, "quaternion_orientation", None)
+        ),
+        spherical_harmonics=render_data.spherical_harmonics.clone(),
+        opacity_logits=render_data.opacity_logits.clone(),
+        sh_degree=int(render_data.sh_degree),
+        extra_fields=extra_fields,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -69,35 +166,9 @@ def _max_sh_degree_hook(
     context: ViewerContext,
     runtime_state: None,
 ) -> SplatRenderData:
-    """prepare_render: limit the active SH degree passed to the backend."""
-
-    class _Capped:
-        def __init__(self, inner: SplatRenderData, degree: int) -> None:
-            self._inner = inner
-            self._degree = degree
-
-        @property
-        def opacity_logits(self) -> torch.Tensor:
-            return self._inner.opacity_logits
-
-        @property
-        def log_half_extents(self) -> torch.Tensor:
-            return self._inner.log_half_extents
-
-        @property
-        def spherical_harmonics(self) -> torch.Tensor:
-            num_bases = (self._degree + 1) ** 2
-            return self._inner.spherical_harmonics[:, :num_bases, :]
-
-        @property
-        def sh_degree(self) -> int:
-            return min(self._degree, self._inner.sh_degree)
-
-        def __getattr__(self, name: str) -> Any:
-            return getattr(self._inner, name)
-
-    active_degree = min(config.max_sh_degree, render_data.sh_degree)
-    return _Capped(render_data, active_degree)  # type: ignore[return-value]
+    """prepare_render: limit the active SH degree on one prepared GS copy."""
+    prepared = _prepare_splat_render_data(render_data)
+    return prepared.cap_sh_degree(config.max_sh_degree)
 
 
 def max_sh_degree_op(default_degree: int = 3) -> GuiOp[SplatRenderData]:
@@ -115,6 +186,7 @@ def max_sh_degree_op(default_degree: int = 3) -> GuiOp[SplatRenderData]:
         default_config=MaxShDegreeConfig(max_sh_degree=default_degree),
         stage="prepare_render",
         hook=_max_sh_degree_hook,
+        requires_prepared_copy=True,
     )
 
 
@@ -140,35 +212,11 @@ def _filter_opacity_hook(
     context: ViewerContext,
     runtime_state: None,
 ) -> SplatRenderData:
-    """prepare_render: remove low-opacity splats before the backend renders."""
-    opacities = torch.sigmoid(render_data.opacity_logits.squeeze(-1))
+    """prepare_render: remove low-opacity splats on one prepared GS copy."""
+    prepared = _prepare_splat_render_data(render_data)
+    opacities = torch.sigmoid(prepared.opacity_logits.squeeze(-1))
     mask = opacities >= config.opacity_threshold
-
-    class _Filtered:
-        def __init__(self, inner: SplatRenderData, keep: torch.Tensor) -> None:
-            self._inner = inner
-            self._keep = keep
-
-        @property
-        def opacity_logits(self) -> torch.Tensor:
-            return self._inner.opacity_logits[self._keep]
-
-        @property
-        def log_half_extents(self) -> torch.Tensor:
-            return self._inner.log_half_extents[self._keep]
-
-        @property
-        def spherical_harmonics(self) -> torch.Tensor:
-            return self._inner.spherical_harmonics[self._keep]
-
-        @property
-        def sh_degree(self) -> int:
-            return self._inner.sh_degree
-
-        def __getattr__(self, name: str) -> Any:
-            return getattr(self._inner, name)[self._keep]
-
-    return _Filtered(render_data, mask)  # type: ignore[return-value]
+    return prepared.apply_mask(mask)
 
 
 def filter_opacity_op(
@@ -188,6 +236,7 @@ def filter_opacity_op(
         default_config=FilterOpacityConfig(opacity_threshold=default_threshold),
         stage="prepare_render",
         hook=_filter_opacity_hook,
+        requires_prepared_copy=True,
     )
 
 
@@ -211,35 +260,11 @@ def _filter_size_hook(
     context: ViewerContext,
     runtime_state: None,
 ) -> SplatRenderData:
-    """prepare_render: remove oversized splats before the backend renders."""
-    max_log_extents = render_data.log_half_extents.amax(dim=-1)
+    """prepare_render: remove oversized splats on one prepared GS copy."""
+    prepared = _prepare_splat_render_data(render_data)
+    max_log_extents = prepared.log_half_extents.amax(dim=-1)
     mask = max_log_extents <= config.max_log_extent
-
-    class _SizeFiltered:
-        def __init__(self, inner: SplatRenderData, keep: torch.Tensor) -> None:
-            self._inner = inner
-            self._keep = keep
-
-        @property
-        def opacity_logits(self) -> torch.Tensor:
-            return self._inner.opacity_logits[self._keep]
-
-        @property
-        def log_half_extents(self) -> torch.Tensor:
-            return self._inner.log_half_extents[self._keep]
-
-        @property
-        def spherical_harmonics(self) -> torch.Tensor:
-            return self._inner.spherical_harmonics[self._keep]
-
-        @property
-        def sh_degree(self) -> int:
-            return self._inner.sh_degree
-
-        def __getattr__(self, name: str) -> Any:
-            return getattr(self._inner, name)[self._keep]
-
-    return _SizeFiltered(render_data, mask)  # type: ignore[return-value]
+    return prepared.apply_mask(mask)
 
 
 def filter_size_op(
@@ -259,6 +284,7 @@ def filter_size_op(
         default_config=FilterSizeConfig(max_log_extent=default_max_log_extent),
         stage="prepare_render",
         hook=_filter_size_hook,
+        requires_prepared_copy=True,
     )
 
 

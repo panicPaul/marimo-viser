@@ -163,6 +163,35 @@ def test_filter_size_removes_large_splats():
     assert result.log_half_extents.shape[0] == 5
 
 
+def test_prepare_filters_materialize_one_mutable_copy() -> None:
+    splats = _make_splats(n=8, opacity_logit=2.0, log_scale=0.5)
+    opacity_op = filter_opacity_op(default_threshold=0.1)
+    size_op = filter_size_op(default_max_log_extent=1.0)
+
+    filtered = opacity_op.hook(
+        splats,
+        FilterOpacityConfig(opacity_threshold=0.1),
+        _context(),
+        None,
+    )
+    filtered_again = size_op.hook(
+        filtered,
+        FilterSizeConfig(max_log_extent=1.0),
+        _context(),
+        None,
+    )
+
+    assert filtered_again is filtered
+    assert (
+        filtered_again.opacity_logits.data_ptr()
+        != splats.opacity_logits.data_ptr()
+    )
+    assert (
+        filtered_again.log_half_extents.data_ptr()
+        != splats.log_half_extents.data_ptr()
+    )
+
+
 # ---------------------------------------------------------------------------
 # show_distribution
 # ---------------------------------------------------------------------------

@@ -13,6 +13,7 @@ backend render; no op may trigger a second backend render.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Generic, Literal, TypeVar
@@ -61,6 +62,9 @@ class GuiOp(Generic[RenderDataT]):
         hook: The op's stage callback (see GuiPipeline.build for signatures).
         runtime_state_factory: Optional factory returning fresh mutable state
             for this op. Called once per ``GuiPipeline.build()`` call.
+        requires_prepared_copy: Whether this op requires a prepared working
+            copy of the render data. Pipelines exclude these ops unless
+            ``allow_prepared_copy=True`` is set explicitly.
     """
 
     name: str
@@ -69,6 +73,7 @@ class GuiOp(Generic[RenderDataT]):
     stage: PipelineStage
     hook: Callable[..., Any]
     runtime_state_factory: Callable[[], Any] | None = None
+    requires_prepared_copy: bool = False
 
 
 class _EmptyConfig(BaseModel):
@@ -87,6 +92,8 @@ class _PipelineRuntimeState(Generic[RenderDataT]):
     op_runtime_states: dict[str, Any]
     render_data: RenderDataT
     viewer_state: NativeViewerState
+    prepared_render_data: RenderDataT | None = None
+    prepare_cache_key: str | None = None
 
 
 @dataclass
@@ -159,16 +166,12 @@ def _run_pipeline(
 
     Exactly one call to ``backend_fn`` occurs per invocation.
     """
-    render_data = pipeline_state.render_data
     config_dict = config.model_dump()
-
-    # Stage 1: prepare_render — ops modify backend inputs
-    for op in pipeline_state.ops:
-        if op.stage != "prepare_render":
-            continue
-        op_config = _extract_op_config(op, config_dict)
-        op_runtime = pipeline_state.op_runtime_states.get(op.name)
-        render_data = op.hook(render_data, op_config, context, op_runtime)
+    render_data = _get_prepared_render_data(
+        context=context,
+        config_dict=config_dict,
+        pipeline_state=pipeline_state,
+    )
 
     # Stage 2: backend_render — exactly once
     result = backend_fn(camera_state, render_data)
@@ -190,6 +193,53 @@ def _run_pipeline(
         result = op.hook(result, op_config, context, op_runtime)
 
     return result
+
+
+def _get_prepared_render_data(
+    *,
+    context: ViewerContext,
+    config_dict: dict[str, Any],
+    pipeline_state: _PipelineRuntimeState[RenderDataT],
+) -> RenderDataT:
+    """Return cached prepare-stage output, recomputing only on config changes."""
+    prepare_ops = [
+        op for op in pipeline_state.ops if op.stage == "prepare_render"
+    ]
+    if not prepare_ops:
+        return pipeline_state.render_data
+
+    prepare_configs = {
+        op.name: _extract_op_config(op, config_dict).model_dump(mode="json")
+        for op in prepare_ops
+    }
+    prepare_cache_key = json.dumps(
+        {
+            "render_data_id": id(pipeline_state.render_data),
+            "prepare_configs": prepare_configs,
+        },
+        sort_keys=True,
+        default=str,
+    )
+    if (
+        pipeline_state.prepared_render_data is not None
+        and pipeline_state.prepare_cache_key == prepare_cache_key
+    ):
+        return pipeline_state.prepared_render_data
+
+    prepared_render_data = pipeline_state.render_data
+    for op in prepare_ops:
+        op_config = _extract_op_config(op, config_dict)
+        op_runtime = pipeline_state.op_runtime_states.get(op.name)
+        prepared_render_data = op.hook(
+            prepared_render_data,
+            op_config,
+            context,
+            op_runtime,
+        )
+
+    pipeline_state.prepared_render_data = prepared_render_data
+    pipeline_state.prepare_cache_key = prepare_cache_key
+    return prepared_render_data
 
 
 def _extract_op_config(
@@ -264,8 +314,9 @@ class GuiPipeline(Generic[RenderDataT]):
         )
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, allow_prepared_copy: bool = False) -> None:
         self._ops: list[GuiOp[RenderDataT]] = []
+        self._allow_prepared_copy = allow_prepared_copy
 
     def pipe(self, op: GuiOp[RenderDataT]) -> GuiPipeline[RenderDataT]:
         """Append a GuiOp and return a new pipeline.
@@ -276,7 +327,9 @@ class GuiPipeline(Generic[RenderDataT]):
         Returns:
             A new GuiPipeline with the op added.
         """
-        next_pipeline: GuiPipeline[RenderDataT] = GuiPipeline()
+        next_pipeline: GuiPipeline[RenderDataT] = GuiPipeline(
+            allow_prepared_copy=self._allow_prepared_copy
+        )
         next_pipeline._ops = [*self._ops, op]
         return next_pipeline
 
@@ -294,18 +347,23 @@ class GuiPipeline(Generic[RenderDataT]):
         Returns:
             A ``GuiPipelineResult`` ready to bind a config and backend render fn.
         """
+        active_ops = [
+            op
+            for op in self._ops
+            if self._allow_prepared_copy or not op.requires_prepared_copy
+        ]
         combined_model, default_instance = _build_combined_config_model(
-            self._ops
+            active_ops
         )
 
         op_runtime_states: dict[str, Any] = {}
-        for op in self._ops:
+        for op in active_ops:
             if op.runtime_state_factory is not None:
                 op_runtime_states[op.name] = op.runtime_state_factory()
 
         pipeline_state = _PipelineRuntimeState(
-            ops=self._ops,
-            op_configs={op.name: op.config_model for op in self._ops},
+            ops=active_ops,
+            op_configs={op.name: op.config_model for op in active_ops},
             op_runtime_states=op_runtime_states,
             render_data=render_data,
             viewer_state=viewer_state,

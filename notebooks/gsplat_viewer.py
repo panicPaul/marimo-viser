@@ -41,6 +41,7 @@ with app.setup:
         GuiPipeline,
         NativeViewerState,
         RenderResult,
+        desktop_viewer,
         filter_opacity_op,
         filter_size_op,
         form_gui,
@@ -92,7 +93,7 @@ def _(viewer_state):
 @app.cell
 def _():
     gui_pipeline = (
-        GuiPipeline()
+        GuiPipeline(allow_prepared_copy=True)
         .pipe(max_sh_degree_op())
         .pipe(filter_opacity_op())
         .pipe(filter_size_op())
@@ -120,8 +121,6 @@ def _(pipeline_result):
 
 @app.cell
 def _(pipeline_config_gui, pipeline_result, viewer_state):
-    from marimo_3dv import desktop_viewer
-
     render_fn = pipeline_result.bind(
         pipeline_config_gui.value or pipeline_result.default_config,
         backend_fn=rasterize_scene,

@@ -94,6 +94,60 @@ def test_single_op_config_exposed():
     assert result.default_config.threshold == 0.5
 
 
+def test_prepared_copy_ops_are_excluded_by_default() -> None:
+    class CopyConfig(BaseModel):
+        threshold: float = 0.5
+
+    copy_op = GuiOp(
+        name="copy_op",
+        config_model=CopyConfig,
+        default_config=CopyConfig(),
+        stage="prepare_render",
+        hook=lambda data, cfg, ctx, rs: data,
+        requires_prepared_copy=True,
+    )
+    normal_op = GuiOp(
+        name="normal_op",
+        config_model=EmptyConfig,
+        default_config=EmptyConfig(),
+        stage="image_overlay",
+        hook=lambda result, cfg, ctx, rs: result,
+    )
+
+    result = (
+        GuiPipeline()
+        .pipe(copy_op)
+        .pipe(normal_op)
+        .build(render_data=None, viewer_state=_make_viewer_state())
+    )
+
+    assert "threshold" not in result.config_model.model_fields
+    assert [op.name for op in result._pipeline_state.ops] == ["normal_op"]
+
+
+def test_prepared_copy_ops_are_included_when_opted_in() -> None:
+    class CopyConfig(BaseModel):
+        threshold: float = 0.5
+
+    copy_op = GuiOp(
+        name="copy_op",
+        config_model=CopyConfig,
+        default_config=CopyConfig(),
+        stage="prepare_render",
+        hook=lambda data, cfg, ctx, rs: data,
+        requires_prepared_copy=True,
+    )
+
+    result = (
+        GuiPipeline(allow_prepared_copy=True)
+        .pipe(copy_op)
+        .build(render_data=None, viewer_state=_make_viewer_state())
+    )
+
+    assert "threshold" in result.config_model.model_fields
+    assert [op.name for op in result._pipeline_state.ops] == ["copy_op"]
+
+
 def test_duplicate_field_name_raises():
     class A(BaseModel):
         value: int = 1
@@ -263,3 +317,79 @@ def test_prepare_render_can_modify_render_data():
     render_fn(cam)
 
     assert received_data[0] == ["modified"]
+
+
+def test_prepare_render_is_cached_across_camera_renders() -> None:
+    prepare_calls: list[int] = []
+    backend_calls: list[int] = []
+
+    def prepare_hook(render_data, config, context, runtime_state):
+        prepare_calls.append(1)
+        return render_data + ["prepared"]
+
+    def backend(camera_state, render_data):
+        backend_calls.append(1)
+        return RenderResult(image=_dummy_image(), metadata={})
+
+    op = GuiOp(
+        name="prepare_once",
+        config_model=EmptyConfig,
+        default_config=EmptyConfig(),
+        stage="prepare_render",
+        hook=prepare_hook,
+    )
+    result = (
+        GuiPipeline()
+        .pipe(op)
+        .build(render_data=[], viewer_state=_make_viewer_state())
+    )
+
+    from marimo_3dv.viewer.widget import CameraState
+
+    render_fn = result.bind(result.default_config, backend_fn=backend)
+    render_fn(CameraState.default())
+    render_fn(CameraState.default(width=640, height=360))
+
+    assert prepare_calls == [1]
+    assert backend_calls == [1, 1]
+
+
+def test_prepare_render_recomputes_when_prepare_config_changes() -> None:
+    prepare_calls: list[int] = []
+
+    class ThresholdConfig(BaseModel):
+        threshold: float = 0.5
+
+    def prepare_hook(render_data, config, context, runtime_state):
+        prepare_calls.append(1)
+        return render_data + [config.threshold]
+
+    op = GuiOp(
+        name="threshold",
+        config_model=ThresholdConfig,
+        default_config=ThresholdConfig(),
+        stage="prepare_render",
+        hook=prepare_hook,
+    )
+    result = (
+        GuiPipeline()
+        .pipe(op)
+        .build(render_data=[], viewer_state=_make_viewer_state())
+    )
+
+    def backend(camera_state, render_data):
+        return RenderResult(image=_dummy_image(), metadata={})
+
+    from marimo_3dv.viewer.widget import CameraState
+
+    render_fn_a = result.bind(
+        ThresholdConfig(threshold=0.5), backend_fn=backend
+    )
+    render_fn_b = result.bind(
+        ThresholdConfig(threshold=0.75), backend_fn=backend
+    )
+    render_fn_a(CameraState.default())
+    render_fn_a(CameraState.default(width=640, height=360))
+    render_fn_b(CameraState.default())
+
+    assert prepare_calls == [1, 1]

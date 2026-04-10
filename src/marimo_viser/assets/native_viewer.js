@@ -220,6 +220,9 @@ function render({ model, el }) {
   let smoothedPacketSizeBytes = null;
   let smoothedBackendToBrowserTimeMs = null;
   const revisionSentAtMs = new Map();
+  const recentDrawTimestamps = [];
+  let viewerFps = null;
+  let renderFps = null;
   let latestScheduledFrameRevision = -1;
   let interactionActive = Boolean(model.get("interaction_active"));
   let settleTimeoutId = null;
@@ -257,13 +260,12 @@ function render({ model, el }) {
       return;
     }
     latencyBadge.hidden = false;
-    const latencyText = `${Math.round(averageLatencyMs)} ms`;
-    if (lastRenderTimeMs === null) {
-      latencyBadge.textContent = latencyText;
-      return;
-    }
-    latencyBadge.textContent =
-      `${latencyText} | render ${Math.round(lastRenderTimeMs)} ms`;
+    const viewerMs = `${Math.round(averageLatencyMs)}ms`;
+    const viewerFpsStr = viewerFps !== null ? `${Math.round(viewerFps)}fps` : "—fps";
+    const renderMs = lastRenderTimeMs !== null ? `${Math.round(lastRenderTimeMs)}ms` : "—ms";
+    const renderFpsStr = renderFps !== null ? `${Math.round(renderFps)}fps` : "—fps";
+    latencyBadge.innerHTML =
+      `viewer | ${viewerMs} | ${viewerFpsStr}<br>render | ${renderMs} | ${renderFpsStr}`;
   }
 
   function syncMetricsToModel() {
@@ -540,6 +542,14 @@ function render({ model, el }) {
     frameContext.drawImage(bitmap, 0, 0, width, height);
     bitmap.close();
     lastFrameRevision = revision;
+    const nowMs = performance.now();
+    recentDrawTimestamps.push(nowMs);
+    const cutoff = nowMs - 1000.0;
+    while (recentDrawTimestamps.length > 0 && recentDrawTimestamps[0] < cutoff) {
+      recentDrawTimestamps.shift();
+    }
+    viewerFps = recentDrawTimestamps.length;
+    updateLatencyBadge();
     const drawFinishedAt = performance.now();
     if (interactionActiveFrame) {
       const receiveQueueTimeMs = decodeEnqueueAt - messageReceivedAtMs;
@@ -604,6 +614,9 @@ function render({ model, el }) {
         shouldReset,
       );
       registerFrameMetrics(revision, renderTimeMs, shouldReset);
+      if (interactionActive) {
+        pushCameraState();
+      }
       return;
     }
     revisionSentAtMs.delete(revision);
@@ -888,10 +901,18 @@ function render({ model, el }) {
     pushCameraState();
   };
   const onInteractionActiveChange = () => {
+    const wasActive = interactionActive;
     interactionActive = Boolean(model.get("interaction_active"));
+    if (interactionActive && !wasActive) {
+      scheduleSettledRender();
+    }
   };
   const onStreamConfigChange = () => {
     connectFrameStream();
+  };
+  const onRenderFpsChange = () => {
+    renderFps = Number(model.get("render_fps")) || null;
+    updateLatencyBadge();
   };
 
   model.on("change:camera_state_json", onCameraChange);
@@ -900,6 +921,7 @@ function render({ model, el }) {
   model.on("change:stream_port", onStreamConfigChange);
   model.on("change:stream_path", onStreamConfigChange);
   model.on("change:stream_token", onStreamConfigChange);
+  model.on("change:render_fps", onRenderFpsChange);
 
   updateAspectRatio();
   updateLatencyBadge();
@@ -919,6 +941,7 @@ function render({ model, el }) {
     model.off("change:stream_port", onStreamConfigChange);
     model.off("change:stream_path", onStreamConfigChange);
     model.off("change:stream_token", onStreamConfigChange);
+    model.off("change:render_fps", onRenderFpsChange);
     if (settleTimeoutId !== null) {
       clearTimeout(settleTimeoutId);
     }

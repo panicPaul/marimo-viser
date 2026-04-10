@@ -43,7 +43,7 @@ build-backend = "uv_build"
 
 [tool.ruff]
 line-length = 80  # Must match above
-extend-exclude = [".agents"]
+extend-exclude = [".agents", "legacy_notebooks"]
 
 
 [tool.ruff.lint] # Mostly just copied over from mojo

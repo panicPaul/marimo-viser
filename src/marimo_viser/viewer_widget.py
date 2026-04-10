@@ -821,6 +821,7 @@ class _NativeViewerAnyWidget(anywidget.AnyWidget):
     browser_decode_time_ms = traitlets.Float(0.0).tag(sync=True)
     browser_draw_time_ms = traitlets.Float(0.0).tag(sync=True)
     browser_present_wait_ms = traitlets.Float(0.0).tag(sync=True)
+    render_fps = traitlets.Float(0.0).tag(sync=True)
     last_click_json = traitlets.Unicode("").tag(sync=True)
     is_rendering = traitlets.Bool(False).tag(sync=True)
     error_text = traitlets.Unicode("").tag(sync=True)
@@ -870,6 +871,7 @@ class NativeViewerWidget(_StableMarimoAnyWidget):
         self._stream_path = anywidget_instance.stream_path
         self._last_debug_sample_at: float | None = None
         self._smoothed_debug_metrics: dict[str, float] = {}
+        self._render_frame_timestamps: list[float] = []
         try:
             self._main_loop: asyncio.AbstractEventLoop | None = (
                 asyncio.get_running_loop()
@@ -1049,9 +1051,15 @@ class NativeViewerWidget(_StableMarimoAnyWidget):
         self.widget.error_text = ""
         self.widget._camera_revision += 1
 
-    def rerender(self) -> None:
-        """Request a fresh render without changing the camera pose."""
+    def rerender(self, *, interactive: bool = False) -> None:
+        """Request a fresh render without changing the camera pose.
+
+        When `interactive` is True the render uses interactive quality and
+        scale, and a settled render is automatically scheduled afterward.
+        """
         self.widget.error_text = ""
+        if interactive:
+            self.widget.interaction_active = True
         self.widget._camera_revision += 1
 
     def _interactive_camera_state(
@@ -1147,6 +1155,15 @@ class NativeViewerWidget(_StableMarimoAnyWidget):
             ).to_json()
 
         self._latest_frame_array = frame.copy()
+        now = time.perf_counter()
+        self._render_frame_timestamps.append(now)
+        cutoff = now - 1.0
+        while (
+            self._render_frame_timestamps
+            and self._render_frame_timestamps[0] < cutoff
+        ):
+            self._render_frame_timestamps.pop(0)
+        render_fps = float(len(self._render_frame_timestamps))
         packet = _pack_frame_packet(
             {
                 "type": "frame",
@@ -1203,6 +1220,7 @@ class NativeViewerWidget(_StableMarimoAnyWidget):
                     self.widget.stream_send_time_ms = smoothed_metrics[
                         "stream_send_time_ms"
                     ]
+                    self.widget.render_fps = render_fps
                     self.widget.send_state(
                         [
                             "render_queue_time_ms",
@@ -1210,6 +1228,7 @@ class NativeViewerWidget(_StableMarimoAnyWidget):
                             "encode_time_ms",
                             "stream_queue_time_ms",
                             "stream_send_time_ms",
+                            "render_fps",
                         ]
                     )
 
@@ -1262,7 +1281,9 @@ def native_viewer(
     the same `state` object across reruns to persist the camera state and last
     click even when `render_fn` is recreated. `interactive_scale` optionally
     downsamples motion renders while keeping settled renders at full resolution;
-    `None` and `1.0` both disable motion downscaling.
+    `None` and `1.0` both disable motion downscaling. Interactive render rate
+    is limited by the browser's pointer event frequency (typically 20-60 fps);
+    use `rerender(interactive=True)` to drive rendering from Python instead.
 
     The returned widget exposes:
 

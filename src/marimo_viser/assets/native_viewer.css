@@ -39,7 +39,7 @@
 
 .native-viewer-badge {
   padding: 6px 10px;
-  border-radius: 999px;
+  border-radius: 6px;
   background: rgba(255, 255, 255, 0.82);
   backdrop-filter: blur(8px);
   border: 1px solid rgba(15, 23, 42, 0.12);

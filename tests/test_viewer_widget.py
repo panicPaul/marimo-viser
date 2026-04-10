@@ -474,6 +474,24 @@ def test_marimo_viewer_caps_motion_render_larger_axis_only() -> None:
     assert viewer.get_camera_state().height == 80
 
 
+def test_marimo_viewer_caps_settled_render_larger_axis_with_internal_limit() -> (
+    None
+):
+    rendered_sizes: list[tuple[int, int]] = []
+    viewer = marimo_viewer(
+        lambda state: (
+            rendered_sizes.append((state.width, state.height))
+            or np.zeros((state.height, state.width, 3), dtype=np.uint8)
+        ),
+        initial_view=CameraState.default(width=160, height=80),
+        state=ViewerState(internal_render_max_side=100),
+    )
+
+    assert rendered_sizes[0] == (100, 50)
+    assert viewer.get_camera_state().width == 160
+    assert viewer.get_camera_state().height == 80
+
+
 def test_marimo_viewer_render_errors_raise_by_default() -> None:
     with pytest.raises(RuntimeError, match="boom"):
         marimo_viewer(
@@ -509,6 +527,13 @@ def test_viewer_state_rejects_non_positive_interactive_max_side() -> None:
         ValueError, match="interactive_max_side must be None or a positive"
     ):
         ViewerState(interactive_max_side=0)
+
+
+def test_viewer_state_rejects_non_positive_internal_render_max_side() -> None:
+    with pytest.raises(
+        ValueError, match="internal_render_max_side must be None or a positive"
+    ):
+        ViewerState(internal_render_max_side=0)
 
 
 def test_viewer_state_accepts_none_interactive_max_side() -> None:

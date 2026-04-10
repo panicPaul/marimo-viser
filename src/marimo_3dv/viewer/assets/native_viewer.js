@@ -537,7 +537,7 @@ function render({ model, el }) {
     const renderMs = lastRenderTimeMs !== null ? `${Math.round(lastRenderTimeMs)}ms` : "—ms";
     const renderFpsStr = renderFps !== null ? `${Math.round(renderFps)}fps` : "—fps";
     latencyBadge.innerHTML =
-      `viewer | ${viewerMs} | ${viewerFpsStr}<br>render | ${renderMs} | ${renderFpsStr}`;
+      `<strong>Viewer</strong> ${viewerMs} ${viewerFpsStr}<br><strong>Render</strong> ${renderMs} ${renderFpsStr}`;
   }
 
   function syncMetricsToModel() {

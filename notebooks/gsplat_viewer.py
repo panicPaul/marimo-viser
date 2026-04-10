@@ -78,6 +78,7 @@ def _():
         camera_convention="opencv",
         interactive_quality=50,
         interactive_max_side=1980,
+        internal_render_max_side=3840,
     )
     return (viewer_state,)
 
@@ -97,10 +98,10 @@ def _(viewer_state):
 def _():
     gui_pipeline = (
         GuiPipeline(allow_prepared_copy=True)
-        .pipe(max_sh_degree_op())
-        .pipe(filter_opacity_op())
-        .pipe(filter_size_op())
-        .pipe(show_distribution_op())
+        # .pipe(max_sh_degree_op())
+        # .pipe(filter_opacity_op())
+        # .pipe(filter_size_op())
+        # .pipe(show_distribution_op())
     )
     return (gui_pipeline,)
 
@@ -171,6 +172,7 @@ def _():
 
 
 @app.function
+@torch.no_grad()
 def rasterize_scene(
     camera: CameraState, scene: SplatScene | None
 ) -> RenderResult:

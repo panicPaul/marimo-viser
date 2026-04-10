@@ -555,6 +555,7 @@ class ViewerState:
     aspect_ratio: float
     interactive_quality: int
     settled_quality: Literal["jpeg_95", "jpeg_100", "png"]
+    internal_render_max_side: int | None
     interactive_max_side: int | None
     raise_on_error: bool
     last_click: ViewerClick | None = None
@@ -583,6 +584,7 @@ class ViewerState:
         aspect_ratio: float = 16.3 / 9.0,
         interactive_quality: int = 50,
         settled_quality: Literal["jpeg_95", "jpeg_100", "png"] = "jpeg_100",
+        internal_render_max_side: int | None = 3840,
         interactive_max_side: int | None = 1980,
         raise_on_error: bool = True,
         last_click: ViewerClick | None = None,
@@ -607,6 +609,14 @@ class ViewerState:
                 "interactive_quality must be in [1, 100], "
                 f"got {interactive_quality}."
             )
+        if (
+            internal_render_max_side is not None
+            and internal_render_max_side <= 0
+        ):
+            raise ValueError(
+                "internal_render_max_side must be None or a positive integer, "
+                f"got {internal_render_max_side}."
+            )
         if interactive_max_side is not None and interactive_max_side <= 0:
             raise ValueError(
                 "interactive_max_side must be None or a positive integer, "
@@ -618,6 +628,7 @@ class ViewerState:
         self.aspect_ratio = aspect_ratio
         self.interactive_quality = interactive_quality
         self.settled_quality = settled_quality
+        self.internal_render_max_side = internal_render_max_side
         self.interactive_max_side = interactive_max_side
         self.raise_on_error = raise_on_error
         self.last_click = last_click
@@ -709,6 +720,7 @@ class ViewerState:
             aspect_ratio=self.aspect_ratio,
             interactive_quality=self.interactive_quality,
             settled_quality=self.settled_quality,
+            internal_render_max_side=self.internal_render_max_side,
             interactive_max_side=self.interactive_max_side,
             raise_on_error=self.raise_on_error,
             last_click=self.last_click,
@@ -1082,6 +1094,7 @@ class MarimoViewer(_StableMarimoAnyWidget):
         render_fn: Callable[[CameraState], np.ndarray | torch.Tensor],
         interactive_quality: int,
         settled_quality: Literal["jpeg_95", "jpeg_100", "png"],
+        internal_render_max_side: int | None,
         interactive_max_side: int | None,
         state: ViewerState | None,
         raise_on_error: bool,
@@ -1090,6 +1103,7 @@ class MarimoViewer(_StableMarimoAnyWidget):
         self._latest_frame_array: np.ndarray | None = None
         self._interactive_quality = interactive_quality
         self._settled_quality = settled_quality
+        self._internal_render_max_side = internal_render_max_side
         self._interactive_max_side = interactive_max_side
         self._raise_on_error = raise_on_error
         self._state = state
@@ -1379,16 +1393,16 @@ class MarimoViewer(_StableMarimoAnyWidget):
         self.widget._camera_revision += 1
         self._wait_for_revision(self.widget._camera_revision)
 
-    def _interactive_camera_state(
-        self, camera_state: CameraState
+    def _camera_state_with_max_side(
+        self, camera_state: CameraState, max_side: int | None
     ) -> CameraState:
-        """Return a motion-time render state with downscaled dimensions."""
-        if self._interactive_max_side is None:
+        """Return a camera state with its larger axis capped to ``max_side``."""
+        if max_side is None:
             return camera_state
         larger_axis = max(camera_state.width, camera_state.height)
-        if larger_axis <= self._interactive_max_side:
+        if larger_axis <= max_side:
             return camera_state
-        downscale = self._interactive_max_side / larger_axis
+        downscale = max_side / larger_axis
         scaled_width = max(1, round(camera_state.width * downscale))
         scaled_height = max(1, round(camera_state.height * downscale))
         if (
@@ -1398,11 +1412,27 @@ class MarimoViewer(_StableMarimoAnyWidget):
             return camera_state
         return camera_state.with_size(scaled_width, scaled_height)
 
+    def _render_camera_state(
+        self, camera_state: CameraState, *, interaction_active: bool
+    ) -> CameraState:
+        """Return the effective render camera state for the current mode."""
+        effective_camera_state = self._camera_state_with_max_side(
+            camera_state,
+            self._internal_render_max_side,
+        )
+        if interaction_active:
+            effective_camera_state = self._camera_state_with_max_side(
+                effective_camera_state,
+                self._interactive_max_side,
+            )
+        return effective_camera_state
+
     def _on_camera_revision_change(self, change: dict[str, object]) -> None:
         del change
-        camera_state = CameraState.from_json(self.widget.camera_state_json)
-        if self.widget.interaction_active:
-            camera_state = self._interactive_camera_state(camera_state)
+        camera_state = self._render_camera_state(
+            CameraState.from_json(self.widget.camera_state_json),
+            interaction_active=self.widget.interaction_active,
+        )
         self._renderer.request(
             self.widget._camera_revision,
             camera_state,
@@ -1606,6 +1636,7 @@ def marimo_viewer(
     aspect_ratio: float | None = None,
     interactive_quality: int | None = None,
     settled_quality: Literal["jpeg_95", "jpeg_100", "png"] | None = None,
+    internal_render_max_side: int | None = None,
     interactive_max_side: int | None = None,
     camera_convention: CameraConvention | None = None,
     initial_view: CameraState | None = None,
@@ -1622,12 +1653,13 @@ def marimo_viewer(
     state is provided via `initial_view` or `state`. Axis-gizmo visibility is
     stored in `ViewerState.show_axes`. Reuse the same `state` object
     across reruns to persist the camera state and last click even when
-    `render_fn` is recreated. `interactive_max_side` caps the larger image axis
-    during motion renders while keeping settled renders at full resolution;
-    `None` disables motion downscaling. Interactive render rate is limited by
-    the browser's pointer event frequency (typically 20-60 fps); use
-    `rerender(interactive=True)` to drive rendering from Python instead. When
-    `raise_on_error` is `True`, Python-triggered renders re-raise render
+    `render_fn` is recreated. `internal_render_max_side` caps the larger image
+    axis for all renders while preserving the live widget aspect ratio.
+    `interactive_max_side` applies an additional motion-only cap on top of
+    that; `None` disables motion downscaling. Interactive render rate is
+    limited by the browser's pointer event frequency (typically 20-60 fps);
+    use `rerender(interactive=True)` to drive rendering from Python instead.
+    When `raise_on_error` is `True`, Python-triggered renders re-raise render
     exceptions instead of only surfacing them in widget state.
 
     The returned widget exposes:
@@ -1653,6 +1685,11 @@ def marimo_viewer(
             ),
             settled_quality=(
                 settled_quality if settled_quality is not None else "jpeg_100"
+            ),
+            internal_render_max_side=(
+                internal_render_max_side
+                if internal_render_max_side is not None
+                else 2560
             ),
             interactive_max_side=(
                 interactive_max_side
@@ -1693,6 +1730,7 @@ def marimo_viewer(
         render_fn=render_fn,
         interactive_quality=state.interactive_quality,
         settled_quality=state.settled_quality,
+        internal_render_max_side=state.internal_render_max_side,
         interactive_max_side=state.interactive_max_side,
         state=state,
         raise_on_error=state.raise_on_error,

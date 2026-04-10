@@ -11,6 +11,7 @@ from typing import Any
 
 import numpy as np
 import pyglet
+import pyglet.shapes
 import pyglet.text
 import pyglet.window
 
@@ -54,11 +55,10 @@ class DesktopViewer:
         width: int = 1280,
         height: int = 720,
         title: str = "marimo-3dv desktop viewer",
-        target_fps: float = 60.0,
     ) -> None:
         self._render_fn = render_fn
         self._state = state or ViewerState()
-        self._target_fps = target_fps
+        self._logical_window_size = (width, height)
 
         camera = self._state.camera_state
         if camera.width != width or camera.height != height:
@@ -74,23 +74,60 @@ class DesktopViewer:
 
         # Track render timing for stats.
         self._last_render_ms: float = 0.0
-        self._last_fps: float = 0.0
-        self._frame_times: list[float] = []
+        self._last_viewer_fps: float = 0.0
+        self._draw_frame_times: list[float] = []
+        self._last_render_fps: float = 0.0
+        self._render_frame_times: list[float] = []
 
         self._state._reset_camera_callback = self._on_camera_set
 
         self._window = pyglet.window.Window(
             width=width, height=height, caption=title, resizable=True
         )
+        self._stats_shadow = pyglet.shapes.Rectangle(
+            x=18,
+            y=height - 134,
+            width=276,
+            height=126,
+            color=(15, 23, 42),
+        )
+        self._stats_shadow.opacity = 26
+        self._stats_background = pyglet.shapes.Rectangle(
+            x=16,
+            y=height - 136,
+            width=276,
+            height=126,
+            color=(248, 251, 255),
+        )
+        self._stats_background.opacity = 236
+        self._stats_border = pyglet.shapes.Rectangle(
+            x=16,
+            y=height - 136,
+            width=276,
+            height=1,
+            color=(222, 231, 240),
+        )
+        self._stats_title = pyglet.text.Label(
+            "Stats",
+            font_name="monospace",
+            font_size=12,
+            x=28,
+            y=height - 24,
+            color=(71, 85, 105, 255),
+            anchor_x="left",
+            anchor_y="top",
+        )
         self._stats_label = pyglet.text.Label(
             "",
             font_name="monospace",
-            font_size=11,
-            x=8,
-            y=8,
-            color=(255, 255, 80, 220),
+            font_size=14,
+            x=28,
+            y=height - 42,
+            color=(15, 23, 42, 255),
             multiline=True,
-            width=400,
+            width=238,
+            anchor_x="left",
+            anchor_y="top",
         )
         self._register_handlers()
 
@@ -106,7 +143,7 @@ class DesktopViewer:
             width, height, "RGB", flipped.tobytes()
         )
         texture = image_data.get_texture()
-        win_w, win_h = self._window.get_size()
+        win_w, win_h = self._get_framebuffer_size()
         sprite = pyglet.sprite.Sprite(texture, x=0, y=0)
         sprite.scale_x = win_w / sprite.width
         sprite.scale_y = win_h / sprite.height
@@ -115,6 +152,38 @@ class DesktopViewer:
     # ------------------------------------------------------------------
     # Camera math
     # ------------------------------------------------------------------
+
+    def _get_window_size(self) -> tuple[int, int]:
+        """Return the tracked live window size used for interaction coordinates."""
+        return self._logical_window_size
+
+    def _get_framebuffer_size(self) -> tuple[int, int]:
+        """Return the drawable framebuffer size, falling back to window size."""
+        get_framebuffer_size = getattr(
+            self._window, "get_framebuffer_size", None
+        )
+        if get_framebuffer_size is None:
+            return self._window.get_size()
+        return get_framebuffer_size()
+
+    def _sync_camera_size_from_framebuffer(self) -> None:
+        """Match render resolution to the drawable framebuffer size."""
+        framebuffer_width, framebuffer_height = self._get_framebuffer_size()
+        target_width = framebuffer_width
+        target_height = framebuffer_height
+        max_side = self._state.internal_render_max_side
+        if max_side is not None:
+            larger_axis = max(framebuffer_width, framebuffer_height)
+            if larger_axis > max_side:
+                downscale = max_side / larger_axis
+                target_width = max(1, round(framebuffer_width * downscale))
+                target_height = max(1, round(framebuffer_height * downscale))
+        camera = self._state.camera_state
+        if camera.width != target_width or camera.height != target_height:
+            self._state.camera_state = camera.with_size(
+                target_width,
+                target_height,
+            )
 
     def _camera_axes(
         self,
@@ -211,11 +280,12 @@ class DesktopViewer:
         """Pan in the image plane using the JS orbit-distance/FOV scaling."""
         _position, right, up, _forward = self._camera_axes()
         cam = self._state.camera_state
+        _window_width, window_height = self._get_window_size()
         fov_radians = np.deg2rad(cam.fov_degrees)
         pan_scale = (
             max(_MIN_ORBIT_DISTANCE, self._orbit_distance)
             * np.tan(fov_radians / 2.0)
-            / max(1, cam.height)
+            / max(1, window_height)
             * 2.0
         )
         delta = -dx * pan_scale * right + dy * pan_scale * up
@@ -265,6 +335,16 @@ class DesktopViewer:
     def _register_handlers(self) -> None:
         @self._window.event
         def on_draw() -> None:
+            now = time.perf_counter()
+            self._draw_frame_times.append(now)
+            cutoff = now - 1.0
+            self._draw_frame_times = [
+                timestamp
+                for timestamp in self._draw_frame_times
+                if timestamp > cutoff
+            ]
+            self._last_viewer_fps = float(len(self._draw_frame_times))
+
             self._window.clear()
             with self._frame_lock:
                 frame = self._latest_frame
@@ -273,19 +353,29 @@ class DesktopViewer:
             # Stats overlay.
             cam = self._state.camera_state
             if self._state.show_stats:
+                logical_width, logical_height = self._get_window_size()
+                render_width, render_height = cam.width, cam.height
+                self._stats_shadow.draw()
+                self._stats_background.draw()
+                self._stats_border.draw()
+                self._stats_title.draw()
                 self._stats_label.text = (
-                    f"render: {self._last_render_ms:.1f} ms  "
-                    f"fps: {self._last_fps:.1f}\n"
-                    f"fov: {cam.fov_degrees:.1f}°  "
-                    f"{cam.width}x{cam.height}\n"
-                    f"pos: {cam.cam_to_world[:3, 3]}"
+                    f"Viewer {self._last_viewer_fps:.0f}fps\n"
+                    f"Render {self._last_render_ms:.0f}ms {self._last_render_fps:.0f}fps\n"
+                    f"Window {logical_width}x{logical_height}\n"
+                    f"Render {render_width}x{render_height}"
                 )
                 self._stats_label.draw()
 
         @self._window.event
         def on_resize(width: int, height: int) -> None:
-            camera = self._state.camera_state
-            self._state.camera_state = camera.with_size(width, height)
+            self._logical_window_size = (max(1, width), max(1, height))
+            self._sync_camera_size_from_framebuffer()
+            self._stats_shadow.y = height - 134
+            self._stats_background.y = height - 136
+            self._stats_border.y = height - 136
+            self._stats_title.y = height - 24
+            self._stats_label.y = height - 42
 
         @self._window.event
         def on_mouse_press(x: int, y: int, button: int, modifiers: int) -> None:
@@ -308,13 +398,15 @@ class DesktopViewer:
                     and not self._input.drag_exceeded_click_threshold
                 )
                 if should_emit_click:
-                    win_w, win_h = self._window.get_size()
-                    click_y = win_h - 1 - y
+                    win_w, win_h = self._get_window_size()
+                    framebuffer_w, framebuffer_h = self._get_framebuffer_size()
+                    scale_x = framebuffer_w / max(1, win_w)
+                    scale_y = framebuffer_h / max(1, win_h)
                     self._state.last_click = ViewerClick(
-                        x=x,
-                        y=click_y,
-                        width=win_w,
-                        height=win_h,
+                        x=round(x * scale_x),
+                        y=round((win_h - 1 - y) * scale_y),
+                        width=framebuffer_w,
+                        height=framebuffer_h,
                         camera_state=self._state.camera_state,
                     )
             if button in {
@@ -387,9 +479,18 @@ class DesktopViewer:
                 camera_state = self._state.camera_state
                 frame = self._render_once(camera_state)
                 elapsed_ms = (time.perf_counter() - start) * 1000.0
+                now = time.perf_counter()
                 with self._frame_lock:
                     self._latest_frame = frame
                     self._last_render_ms = elapsed_ms
+                    self._render_frame_times.append(now)
+                    cutoff = now - 1.0
+                    self._render_frame_times = [
+                        timestamp
+                        for timestamp in self._render_frame_times
+                        if timestamp > cutoff
+                    ]
+                    self._last_render_fps = float(len(self._render_frame_times))
                 self._window.invalid = True
             except Exception as exception:
                 self._render_error = exception
@@ -405,13 +506,8 @@ class DesktopViewer:
                 return
 
     def _tick(self, dt: float) -> None:
-        """Main-thread tick: apply held-key movement and update FPS."""
+        """Main-thread tick: apply held-key movement."""
         self._apply_move(dt)
-        now = time.perf_counter()
-        self._frame_times.append(now)
-        cutoff = now - 1.0
-        self._frame_times = [t for t in self._frame_times if t > cutoff]
-        self._last_fps = float(len(self._frame_times))
 
     # ------------------------------------------------------------------
     # Public API
@@ -419,6 +515,12 @@ class DesktopViewer:
 
     def run(self) -> None:
         """Start the render loop and show the window. Blocks until closed."""
+        initial_width, initial_height = self._window.get_size()
+        self._logical_window_size = (
+            max(1, initial_width),
+            max(1, initial_height),
+        )
+        self._sync_camera_size_from_framebuffer()
         initial_camera_state = self._state.camera_state
         initial_frame = self._render_once(initial_camera_state)
         with self._frame_lock:
@@ -428,7 +530,7 @@ class DesktopViewer:
         self._running = True
         render_thread = threading.Thread(target=self._render_loop, daemon=True)
         render_thread.start()
-        pyglet.clock.schedule_interval(self._tick, 1.0 / self._target_fps)
+        pyglet.clock.schedule(self._tick)
         pyglet.app.run()
         self._running = False
         render_thread.join(timeout=2.0)
@@ -494,7 +596,6 @@ def desktop_viewer(
     width: int = 1280,
     height: int = 720,
     title: str = "marimo-3dv desktop viewer",
-    target_fps: float = 60.0,
 ) -> DesktopViewer:
     """Create and return a ``DesktopViewer`` instance."""
     return DesktopViewer(
@@ -503,5 +604,4 @@ def desktop_viewer(
         width=width,
         height=height,
         title=title,
-        target_fps=target_fps,
     )

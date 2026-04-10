@@ -54,9 +54,7 @@ def test_viewer_runs_desktop_backend_outside_notebook(
     monkeypatch.setattr(
         viewer_module,
         "desktop_viewer",
-        lambda render_fn, state=None, width=1280, height=720, title="", target_fps=60.0: (
-            stub
-        ),
+        lambda render_fn, state=None, width=1280, height=720, title="": stub,
     )
 
     viewer = viewer_module.Viewer(lambda camera: camera)

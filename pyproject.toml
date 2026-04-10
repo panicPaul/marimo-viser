@@ -30,6 +30,7 @@ dependencies = [
     "tyro>=1.0.12",
     "pyglet>=2.0.0",
     "viser>=1.0.26",
+    "pip>=26.0.1",
 ]
 
 [project.scripts]

@@ -21,26 +21,26 @@ def Viewer(
     render_fn: Callable[[CameraState], Any],
     *,
     state: ViewerState | None = None,
-    width: int = 1280,
-    height: int = 720,
     title: str = "marimo-3dv viewer",
-    target_fps: float = 60.0,
 ) -> MarimoViewer | DesktopViewer:
     """Create the appropriate viewer backend for the current runtime.
 
     In notebook runtimes this returns a marimo-backed viewer widget. In
     script runtimes it creates and immediately runs the desktop backend.
     """
+    viewer_state = state or ViewerState()
     if mo.running_in_notebook():
-        return marimo_viewer(render_fn, state=state)
+        return marimo_viewer(render_fn, state=viewer_state)
+
+    window_width = 1280
+    window_height = max(1, round(window_width / viewer_state.aspect_ratio))
 
     viewer = desktop_viewer(
         render_fn,
-        state=state,
-        width=width,
-        height=height,
+        state=viewer_state,
+        width=window_width,
+        height=window_height,
         title=title,
-        target_fps=target_fps,
     )
     viewer.run()
     return viewer

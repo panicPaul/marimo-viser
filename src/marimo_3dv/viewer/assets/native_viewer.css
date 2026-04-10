@@ -29,11 +29,11 @@
 
 .native-viewer-overlay {
   position: absolute;
-  left: 12px;
-  top: 12px;
+  left: 16px;
+  top: 16px;
   display: block;
   pointer-events: none;
-  font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  font: 14px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
   color: #0f172a;
 }
 
@@ -55,16 +55,18 @@
 }
 
 .native-viewer-badge {
-  padding: 6px 10px;
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.82);
-  backdrop-filter: blur(8px);
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.88);
+  backdrop-filter: blur(12px);
   border: 1px solid rgba(15, 23, 42, 0.12);
   white-space: pre-wrap;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.12);
 }
 
 .native-viewer-latency {
   white-space: nowrap;
+  min-width: 170px;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -85,7 +87,8 @@
   }
 
   .native-viewer-badge {
-    background: rgba(15, 23, 42, 0.76);
+    background: rgba(15, 23, 42, 0.82);
     border-color: rgba(148, 163, 184, 0.22);
+    box-shadow: 0 12px 28px rgba(2, 6, 23, 0.28);
   }
 }

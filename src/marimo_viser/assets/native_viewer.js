@@ -526,7 +526,8 @@ function render({ model, el }) {
   }
 
   function updateLatencyBadge() {
-    if (averageLatencyMs === null) {
+    const shouldShowStats = Boolean(model.get("show_stats"));
+    if (!shouldShowStats || averageLatencyMs === null) {
       latencyBadge.hidden = true;
       return;
     }
@@ -1197,6 +1198,9 @@ function updateCameraMatrix() {
   const onShowOriginChange = () => {
     drawHorizon();
   };
+  const onShowStatsChange = () => {
+    updateLatencyBadge();
+  };
   const onViewerRotationChange = () => {
     drawAxesGizmo();
     drawHorizon();
@@ -1215,6 +1219,7 @@ function updateCameraMatrix() {
   model.on("change:show_axes", onShowAxesChange);
   model.on("change:show_horizon", onShowHorizonChange);
   model.on("change:show_origin", onShowOriginChange);
+  model.on("change:show_stats", onShowStatsChange);
   model.on("change:viewer_rotation_x_degrees", onViewerRotationChange);
   model.on("change:viewer_rotation_y_degrees", onViewerRotationChange);
   model.on("change:viewer_rotation_z_degrees", onViewerRotationChange);
@@ -1246,6 +1251,7 @@ function updateCameraMatrix() {
     model.off("change:show_axes", onShowAxesChange);
     model.off("change:show_horizon", onShowHorizonChange);
     model.off("change:show_origin", onShowOriginChange);
+    model.off("change:show_stats", onShowStatsChange);
     model.off("change:viewer_rotation_x_degrees", onViewerRotationChange);
     model.off("change:viewer_rotation_y_degrees", onViewerRotationChange);
     model.off("change:viewer_rotation_z_degrees", onViewerRotationChange);

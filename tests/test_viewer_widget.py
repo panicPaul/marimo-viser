@@ -64,6 +64,26 @@ def test_native_viewer_state_defaults_show_axes_and_hides_guides() -> None:
     assert state.show_axes is True
     assert state.show_horizon is False
     assert state.show_origin is False
+    assert state.show_stats is False
+
+
+def test_native_viewer_state_overlay_setters_are_fluent() -> None:
+    state = NativeViewerState()
+
+    chained_state = (
+        state.set_show_axes(False)
+        .set_show_origin(True)
+        .set_show_horizon(True)
+        .set_show_stats(True)
+        .set_origin(1.0, 2.0, 3.0)
+    )
+
+    assert chained_state is state
+    assert state.show_axes is False
+    assert state.show_origin is True
+    assert state.show_horizon is True
+    assert state.show_stats is True
+    assert state.origin == (1.0, 2.0, 3.0)
 
 
 def test_camera_state_with_convention_round_trips() -> None:
@@ -430,7 +450,7 @@ def test_native_viewer_uses_requested_default_camera_convention() -> None:
     assert viewer.get_camera_state().camera_convention == "opengl"
 
 
-def test_native_viewer_downscales_motion_renders_only() -> None:
+def test_native_viewer_caps_motion_render_larger_axis_only() -> None:
     rendered_sizes: list[tuple[int, int, bool]] = []
     viewer = native_viewer(
         lambda state: (
@@ -438,7 +458,7 @@ def test_native_viewer_downscales_motion_renders_only() -> None:
             or np.zeros((state.height, state.width, 3), dtype=np.uint8)
         ),
         initial_view=CameraState.default(width=100, height=80),
-        interactive_scale=0.5,
+        interactive_max_side=50,
     )
     rendered_sizes.clear()
     viewer.anywidget().interaction_active = True
@@ -496,22 +516,22 @@ def test_native_viewer_rejects_out_of_range_interactive_quality() -> None:
         )
 
 
-def test_native_viewer_rejects_out_of_range_interactive_scale() -> None:
+def test_native_viewer_rejects_non_positive_interactive_max_side() -> None:
     with pytest.raises(
-        ValueError, match="interactive_scale must be None or in"
+        ValueError, match="interactive_max_side must be None or a positive"
     ):
         native_viewer(
             lambda state: np.zeros(
                 (state.height, state.width, 3), dtype=np.uint8
             ),
-            interactive_scale=0.0,
+            interactive_max_side=0,
         )
 
 
-def test_native_viewer_accepts_none_interactive_scale() -> None:
+def test_native_viewer_accepts_none_interactive_max_side() -> None:
     viewer = native_viewer(
         lambda state: np.zeros((state.height, state.width, 3), dtype=np.uint8),
-        interactive_scale=None,
+        interactive_max_side=None,
     )
 
     assert viewer is not None

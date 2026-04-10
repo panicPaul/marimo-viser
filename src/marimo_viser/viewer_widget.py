@@ -555,6 +555,7 @@ class NativeViewerState:
     show_axes: bool = True
     show_horizon: bool = False
     show_origin: bool = False
+    show_stats: bool = False
     viewer_rotation_x_degrees: float = 0.0
     viewer_rotation_y_degrees: float = 0.0
     viewer_rotation_z_degrees: float = 0.0
@@ -563,8 +564,10 @@ class NativeViewerState:
     _viewer_rotation_callback: Callable[[float, float, float], None] | None = (
         None
     )
+    _show_axes_callback: Callable[[bool], None] | None = None
     _show_horizon_callback: Callable[[bool], None] | None = None
     _show_origin_callback: Callable[[bool], None] | None = None
+    _show_stats_callback: Callable[[bool], None] | None = None
     _origin_callback: Callable[[float, float, float], None] | None = None
 
     def __init__(
@@ -574,6 +577,7 @@ class NativeViewerState:
         show_axes: bool = True,
         show_horizon: bool = False,
         show_origin: bool = False,
+        show_stats: bool = False,
     ) -> None:
         resolved_camera_state = camera_state or CameraState.default()
         self.camera_state = resolved_camera_state
@@ -582,58 +586,81 @@ class NativeViewerState:
         self.show_axes = show_axes
         self.show_horizon = show_horizon
         self.show_origin = show_origin
+        self.show_stats = show_stats
         self.viewer_rotation_x_degrees = 0.0
         self.viewer_rotation_y_degrees = 0.0
         self.viewer_rotation_z_degrees = 0.0
         self.origin = (0.0, 0.0, 0.0)
         self._reset_camera_callback = None
         self._viewer_rotation_callback = None
+        self._show_axes_callback = None
         self._show_horizon_callback = None
         self._show_origin_callback = None
+        self._show_stats_callback = None
         self._origin_callback = None
 
-    def reset_camera(self) -> None:
+    def reset_camera(self) -> NativeViewerState:
         """Reset the current camera state back to the initial camera state."""
         self.camera_state = self.initial_camera_state
         if self._reset_camera_callback is not None:
             self._reset_camera_callback(self.camera_state)
+        return self
 
-    def set_camera(self, camera_state: CameraState) -> None:
+    def set_camera(self, camera_state: CameraState) -> NativeViewerState:
         """Set the current camera state and push it into the live viewer."""
         self.camera_state = camera_state
         if self._reset_camera_callback is not None:
             self._reset_camera_callback(self.camera_state)
+        return self
 
     def set_viewer_rotation(
         self,
         x_degrees: float,
         y_degrees: float,
         z_degrees: float,
-    ) -> None:
+    ) -> NativeViewerState:
         """Set the persistent viewer-frame rotation used by controls/overlays."""
         self.viewer_rotation_x_degrees = x_degrees
         self.viewer_rotation_y_degrees = y_degrees
         self.viewer_rotation_z_degrees = z_degrees
         if self._viewer_rotation_callback is not None:
             self._viewer_rotation_callback(x_degrees, y_degrees, z_degrees)
+        return self
 
-    def set_show_horizon(self, show_horizon: bool) -> None:
+    def set_show_axes(self, show_axes: bool) -> NativeViewerState:
+        """Set the axis-gizmo visibility and push it into the live viewer."""
+        self.show_axes = show_axes
+        if self._show_axes_callback is not None:
+            self._show_axes_callback(show_axes)
+        return self
+
+    def set_show_horizon(self, show_horizon: bool) -> NativeViewerState:
         """Set the horizon overlay visibility and push it into the live viewer."""
         self.show_horizon = show_horizon
         if self._show_horizon_callback is not None:
             self._show_horizon_callback(show_horizon)
+        return self
 
-    def set_show_origin(self, show_origin: bool) -> None:
+    def set_show_origin(self, show_origin: bool) -> NativeViewerState:
         """Set the origin marker visibility and push it into the live viewer."""
         self.show_origin = show_origin
         if self._show_origin_callback is not None:
             self._show_origin_callback(show_origin)
+        return self
 
-    def set_origin(self, x: float, y: float, z: float) -> None:
+    def set_show_stats(self, show_stats: bool) -> NativeViewerState:
+        """Set the stats overlay visibility and push it into the live viewer."""
+        self.show_stats = show_stats
+        if self._show_stats_callback is not None:
+            self._show_stats_callback(show_stats)
+        return self
+
+    def set_origin(self, x: float, y: float, z: float) -> NativeViewerState:
         """Set the world-space origin marker position in the live viewer."""
         self.origin = (x, y, z)
         if self._origin_callback is not None:
             self._origin_callback(x, y, z)
+        return self
 
 
 def _normalize_frame(
@@ -933,6 +960,7 @@ class _NativeViewerAnyWidget(anywidget.AnyWidget):
     show_axes = traitlets.Bool(False).tag(sync=True)
     show_horizon = traitlets.Bool(False).tag(sync=True)
     show_origin = traitlets.Bool(False).tag(sync=True)
+    show_stats = traitlets.Bool(False).tag(sync=True)
     viewer_rotation_x_degrees = traitlets.Float(0.0).tag(sync=True)
     viewer_rotation_y_degrees = traitlets.Float(0.0).tag(sync=True)
     viewer_rotation_z_degrees = traitlets.Float(0.0).tag(sync=True)
@@ -953,6 +981,7 @@ class _NativeViewerAnyWidget(anywidget.AnyWidget):
         show_axes: bool,
         show_horizon: bool,
         show_origin: bool,
+        show_stats: bool,
         viewer_rotation_x_degrees: float,
         viewer_rotation_y_degrees: float,
         viewer_rotation_z_degrees: float,
@@ -969,6 +998,7 @@ class _NativeViewerAnyWidget(anywidget.AnyWidget):
             show_axes=show_axes,
             show_horizon=show_horizon,
             show_origin=show_origin,
+            show_stats=show_stats,
             viewer_rotation_x_degrees=viewer_rotation_x_degrees,
             viewer_rotation_y_degrees=viewer_rotation_y_degrees,
             viewer_rotation_z_degrees=viewer_rotation_z_degrees,
@@ -990,7 +1020,7 @@ class NativeViewerWidget(_StableMarimoAnyWidget):
         render_fn: Callable[[CameraState], np.ndarray | torch.Tensor],
         interactive_quality: int,
         settled_quality: Literal["jpeg_95", "jpeg_100", "png"],
-        interactive_scale: float | None,
+        interactive_max_side: int | None,
         state: NativeViewerState | None,
         raise_on_error: bool,
     ) -> None:
@@ -998,7 +1028,7 @@ class NativeViewerWidget(_StableMarimoAnyWidget):
         self._latest_frame_array: np.ndarray | None = None
         self._interactive_quality = interactive_quality
         self._settled_quality = settled_quality
-        self._interactive_scale = interactive_scale
+        self._interactive_max_side = interactive_max_side
         self._raise_on_error = raise_on_error
         self._state = state
         self._stream_server = _get_frame_stream_server()
@@ -1034,11 +1064,14 @@ class NativeViewerWidget(_StableMarimoAnyWidget):
             self._on_show_horizon_change, names=["show_horizon"]
         )
         self.widget.observe(self._on_show_origin_change, names=["show_origin"])
+        self.widget.observe(self._on_show_stats_change, names=["show_stats"])
         if self._state is not None:
             self._state._reset_camera_callback = self.set_camera_state
             self._state._viewer_rotation_callback = self.set_viewer_rotation
+            self._state._show_axes_callback = self.set_show_axes
             self._state._show_horizon_callback = self.set_show_horizon
             self._state._show_origin_callback = self.set_show_origin
+            self._state._show_stats_callback = self.set_show_stats
             self._state._origin_callback = self.set_origin
         self.rerender()
 
@@ -1213,6 +1246,13 @@ class NativeViewerWidget(_StableMarimoAnyWidget):
             return
         self._state.show_origin = new_value
 
+    def _on_show_stats_change(self, change: dict[str, object]) -> None:
+        """Persist the stats visibility into the shared state object."""
+        new_value = change.get("new")
+        if not isinstance(new_value, bool) or self._state is None:
+            return
+        self._state.show_stats = new_value
+
     def set_camera_state(self, camera_state: CameraState) -> None:
         """Apply a camera state and request a fresh render."""
         self.widget.camera_state_json = camera_state.to_json()
@@ -1238,6 +1278,11 @@ class NativeViewerWidget(_StableMarimoAnyWidget):
             ]
         )
 
+    def set_show_axes(self, show_axes: bool) -> None:
+        """Update axis-gizmo visibility in the live viewer."""
+        self.widget.show_axes = show_axes
+        self.widget.send_state("show_axes")
+
     def set_show_horizon(self, show_horizon: bool) -> None:
         """Update horizon visibility in the live viewer."""
         self.widget.show_horizon = show_horizon
@@ -1247,6 +1292,11 @@ class NativeViewerWidget(_StableMarimoAnyWidget):
         """Update origin visibility in the live viewer."""
         self.widget.show_origin = show_origin
         self.widget.send_state("show_origin")
+
+    def set_show_stats(self, show_stats: bool) -> None:
+        """Update stats visibility in the live viewer."""
+        self.widget.show_stats = show_stats
+        self.widget.send_state("show_stats")
 
     def set_origin(self, x: float, y: float, z: float) -> None:
         """Update the origin marker position in the live viewer."""
@@ -1271,14 +1321,14 @@ class NativeViewerWidget(_StableMarimoAnyWidget):
         self, camera_state: CameraState
     ) -> CameraState:
         """Return a motion-time render state with downscaled dimensions."""
-        if self._interactive_scale is None or self._interactive_scale >= 1.0:
+        if self._interactive_max_side is None:
             return camera_state
-        scaled_width = max(
-            1, round(camera_state.width * self._interactive_scale)
-        )
-        scaled_height = max(
-            1, round(camera_state.height * self._interactive_scale)
-        )
+        larger_axis = max(camera_state.width, camera_state.height)
+        if larger_axis <= self._interactive_max_side:
+            return camera_state
+        downscale = self._interactive_max_side / larger_axis
+        scaled_width = max(1, round(camera_state.width * downscale))
+        scaled_height = max(1, round(camera_state.height * downscale))
         if (
             scaled_width == camera_state.width
             and scaled_height == camera_state.height
@@ -1494,7 +1544,7 @@ def native_viewer(
     aspect_ratio: float = 16.3 / 9.0,
     interactive_quality: int = 50,
     settled_quality: Literal["jpeg_95", "jpeg_100", "png"] = "jpeg_100",
-    interactive_scale: float | None = None,
+    interactive_max_side: int | None = 1024,
     camera_convention: CameraConvention = "opencv",
     initial_view: CameraState | None = None,
     state: NativeViewerState | None = None,
@@ -1510,10 +1560,10 @@ def native_viewer(
     state is provided via `initial_view` or `state`. Axis-gizmo visibility is
     stored in `NativeViewerState.show_axes`. Reuse the same `state` object
     across reruns to persist the camera state and last click even when
-    `render_fn` is recreated. `interactive_scale` optionally downsamples motion
-    renders while keeping settled renders at full resolution; `None` and `1.0`
-    both disable motion downscaling. Interactive render rate is limited by the
-    browser's pointer event frequency (typically 20-60 fps); use
+    `render_fn` is recreated. `interactive_max_side` caps the larger image axis
+    during motion renders while keeping settled renders at full resolution;
+    `None` disables motion downscaling. Interactive render rate is limited by
+    the browser's pointer event frequency (typically 20-60 fps); use
     `rerender(interactive=True)` to drive rendering from Python instead. When
     `raise_on_error` is `True`, Python-triggered renders re-raise render
     exceptions instead of only surfacing them in widget state.
@@ -1536,10 +1586,10 @@ def native_viewer(
             "interactive_quality must be in [1, 100], "
             f"got {interactive_quality}."
         )
-    if interactive_scale is not None and not 0.0 < interactive_scale <= 1.0:
+    if interactive_max_side is not None and interactive_max_side <= 0:
         raise ValueError(
-            "interactive_scale must be None or in (0, 1], "
-            f"got {interactive_scale}."
+            "interactive_max_side must be None or a positive integer, "
+            f"got {interactive_max_side}."
         )
     resolved_camera_state = (
         state.camera_state
@@ -1550,6 +1600,7 @@ def native_viewer(
     resolved_show_axes = state.show_axes if state is not None else False
     resolved_show_horizon = state.show_horizon if state is not None else False
     resolved_show_origin = state.show_origin if state is not None else False
+    resolved_show_stats = state.show_stats if state is not None else False
     stream_server = _get_frame_stream_server()
     stream_id, stream_token = stream_server.register_stream()
     anywidget_instance = _NativeViewerAnyWidget(
@@ -1558,6 +1609,7 @@ def native_viewer(
         show_axes=resolved_show_axes,
         show_horizon=resolved_show_horizon,
         show_origin=resolved_show_origin,
+        show_stats=resolved_show_stats,
         viewer_rotation_x_degrees=(
             state.viewer_rotation_x_degrees if state is not None else 0.0
         ),
@@ -1581,7 +1633,7 @@ def native_viewer(
         render_fn=render_fn,
         interactive_quality=interactive_quality,
         settled_quality=settled_quality,
-        interactive_scale=interactive_scale,
+        interactive_max_side=interactive_max_side,
         state=state,
         raise_on_error=raise_on_error,
     )

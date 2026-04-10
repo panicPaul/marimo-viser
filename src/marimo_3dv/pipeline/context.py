@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from marimo_3dv.viewer.widget import NativeViewerState, ViewerClick
+    from marimo_3dv.viewer.widget import ViewerClick, ViewerState
 
 
 @dataclass
@@ -17,5 +17,5 @@ class ViewerContext:
     than accessing notebook globals directly.
     """
 
-    viewer_state: NativeViewerState
+    viewer_state: ViewerState
     last_click: ViewerClick | None

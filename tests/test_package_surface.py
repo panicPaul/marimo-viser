@@ -6,17 +6,63 @@ import pytest
 def test_core_imports_work():
     from marimo_3dv import (
         CameraState,
-        NativeViewerState,
-        NativeViewerWidget,
+        MarimoViewer,
+        Viewer,
         ViewerClick,
-        native_viewer,
+        ViewerState,
     )
 
     assert CameraState is not None
-    assert NativeViewerState is not None
-    assert NativeViewerWidget is not None
+    assert MarimoViewer is not None
+    assert Viewer is not None
     assert ViewerClick is not None
-    assert native_viewer is not None
+    assert ViewerState is not None
+
+
+def test_viewer_uses_marimo_backend_in_notebook_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import marimo_3dv.viewer as viewer_module
+
+    sentinel = object()
+    monkeypatch.setattr(viewer_module.mo, "running_in_notebook", lambda: True)
+    monkeypatch.setattr(
+        viewer_module,
+        "marimo_viewer",
+        lambda render_fn, state=None: sentinel,
+    )
+
+    viewer = viewer_module.Viewer(lambda camera: camera)
+
+    assert viewer is sentinel
+
+
+def test_viewer_runs_desktop_backend_outside_notebook(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import marimo_3dv.viewer as viewer_module
+
+    class _StubDesktopViewer:
+        def __init__(self) -> None:
+            self.ran = False
+
+        def run(self) -> None:
+            self.ran = True
+
+    stub = _StubDesktopViewer()
+    monkeypatch.setattr(viewer_module.mo, "running_in_notebook", lambda: False)
+    monkeypatch.setattr(
+        viewer_module,
+        "desktop_viewer",
+        lambda render_fn, state=None, width=1280, height=720, title="", target_fps=60.0: (
+            stub
+        ),
+    )
+
+    viewer = viewer_module.Viewer(lambda camera: camera)
+
+    assert viewer is stub
+    assert stub.ran is True
 
 
 def test_pipeline_imports_work():
@@ -60,8 +106,8 @@ def test_gui_helpers_import():
     assert json_gui is not None
 
 
-def test_desktop_viewer_imports():
-    from marimo_3dv import DesktopViewer, desktop_viewer
+def test_backend_specific_viewer_imports_are_internal_only():
+    from marimo_3dv.viewer.desktop import DesktopViewer, desktop_viewer
 
     assert DesktopViewer is not None
     assert desktop_viewer is not None

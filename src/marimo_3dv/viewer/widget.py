@@ -542,8 +542,8 @@ class ViewerClick:
 
 
 @dataclass
-class NativeViewerState:
-    """Explicit persistent state for a native viewer session.
+class ViewerState:
+    """Explicit persistent state for a viewer session.
 
     Reuse the same state object across reruns to preserve the current camera
     state and last click even when `render_fn` is recreated.
@@ -551,6 +551,12 @@ class NativeViewerState:
 
     camera_state: CameraState
     initial_camera_state: CameraState
+    camera_convention: CameraConvention
+    aspect_ratio: float
+    interactive_quality: int
+    settled_quality: Literal["jpeg_95", "jpeg_100", "png"]
+    interactive_max_side: int | None
+    raise_on_error: bool
     last_click: ViewerClick | None = None
     show_axes: bool = True
     show_horizon: bool = False
@@ -573,15 +579,47 @@ class NativeViewerState:
     def __init__(
         self,
         camera_state: CameraState | None = None,
+        camera_convention: CameraConvention = "opencv",
+        aspect_ratio: float = 16.3 / 9.0,
+        interactive_quality: int = 50,
+        settled_quality: Literal["jpeg_95", "jpeg_100", "png"] = "jpeg_100",
+        interactive_max_side: int | None = 1980,
+        raise_on_error: bool = True,
         last_click: ViewerClick | None = None,
         show_axes: bool = True,
         show_horizon: bool = False,
         show_origin: bool = False,
         show_stats: bool = False,
     ) -> None:
-        resolved_camera_state = camera_state or CameraState.default()
+        resolved_camera_state = camera_state or CameraState.default(
+            camera_convention=camera_convention
+        )
+        if resolved_camera_state.camera_convention != camera_convention:
+            resolved_camera_state = resolved_camera_state.with_convention(
+                camera_convention
+            )
+        if aspect_ratio <= 0.0:
+            raise ValueError(
+                f"aspect_ratio must be positive, got {aspect_ratio}."
+            )
+        if not 1 <= interactive_quality <= 100:
+            raise ValueError(
+                "interactive_quality must be in [1, 100], "
+                f"got {interactive_quality}."
+            )
+        if interactive_max_side is not None and interactive_max_side <= 0:
+            raise ValueError(
+                "interactive_max_side must be None or a positive integer, "
+                f"got {interactive_max_side}."
+            )
         self.camera_state = resolved_camera_state
         self.initial_camera_state = resolved_camera_state
+        self.camera_convention = resolved_camera_state.camera_convention
+        self.aspect_ratio = aspect_ratio
+        self.interactive_quality = interactive_quality
+        self.settled_quality = settled_quality
+        self.interactive_max_side = interactive_max_side
+        self.raise_on_error = raise_on_error
         self.last_click = last_click
         self.show_axes = show_axes
         self.show_horizon = show_horizon
@@ -599,16 +637,17 @@ class NativeViewerState:
         self._show_stats_callback = None
         self._origin_callback = None
 
-    def reset_camera(self) -> NativeViewerState:
+    def reset_camera(self) -> ViewerState:
         """Reset the current camera state back to the initial camera state."""
         self.camera_state = self.initial_camera_state
         if self._reset_camera_callback is not None:
             self._reset_camera_callback(self.camera_state)
         return self
 
-    def set_camera(self, camera_state: CameraState) -> NativeViewerState:
+    def set_camera(self, camera_state: CameraState) -> ViewerState:
         """Set the current camera state and push it into the live viewer."""
         self.camera_state = camera_state
+        self.camera_convention = camera_state.camera_convention
         if self._reset_camera_callback is not None:
             self._reset_camera_callback(self.camera_state)
         return self
@@ -618,7 +657,7 @@ class NativeViewerState:
         x_degrees: float,
         y_degrees: float,
         z_degrees: float,
-    ) -> NativeViewerState:
+    ) -> ViewerState:
         """Set the persistent viewer-frame rotation used by controls/overlays."""
         self.viewer_rotation_x_degrees = x_degrees
         self.viewer_rotation_y_degrees = y_degrees
@@ -627,40 +666,63 @@ class NativeViewerState:
             self._viewer_rotation_callback(x_degrees, y_degrees, z_degrees)
         return self
 
-    def set_show_axes(self, show_axes: bool) -> NativeViewerState:
+    def set_show_axes(self, show_axes: bool) -> ViewerState:
         """Set the axis-gizmo visibility and push it into the live viewer."""
         self.show_axes = show_axes
         if self._show_axes_callback is not None:
             self._show_axes_callback(show_axes)
         return self
 
-    def set_show_horizon(self, show_horizon: bool) -> NativeViewerState:
+    def set_show_horizon(self, show_horizon: bool) -> ViewerState:
         """Set the horizon overlay visibility and push it into the live viewer."""
         self.show_horizon = show_horizon
         if self._show_horizon_callback is not None:
             self._show_horizon_callback(show_horizon)
         return self
 
-    def set_show_origin(self, show_origin: bool) -> NativeViewerState:
+    def set_show_origin(self, show_origin: bool) -> ViewerState:
         """Set the origin marker visibility and push it into the live viewer."""
         self.show_origin = show_origin
         if self._show_origin_callback is not None:
             self._show_origin_callback(show_origin)
         return self
 
-    def set_show_stats(self, show_stats: bool) -> NativeViewerState:
+    def set_show_stats(self, show_stats: bool) -> ViewerState:
         """Set the stats overlay visibility and push it into the live viewer."""
         self.show_stats = show_stats
         if self._show_stats_callback is not None:
             self._show_stats_callback(show_stats)
         return self
 
-    def set_origin(self, x: float, y: float, z: float) -> NativeViewerState:
+    def set_origin(self, x: float, y: float, z: float) -> ViewerState:
         """Set the world-space origin marker position in the live viewer."""
         self.origin = (x, y, z)
         if self._origin_callback is not None:
             self._origin_callback(x, y, z)
         return self
+
+    def copy(self) -> ViewerState:
+        """Return a shallow copy of the current viewer configuration/state."""
+        copied = ViewerState(
+            camera_state=self.camera_state,
+            camera_convention=self.camera_convention,
+            aspect_ratio=self.aspect_ratio,
+            interactive_quality=self.interactive_quality,
+            settled_quality=self.settled_quality,
+            interactive_max_side=self.interactive_max_side,
+            raise_on_error=self.raise_on_error,
+            last_click=self.last_click,
+            show_axes=self.show_axes,
+            show_horizon=self.show_horizon,
+            show_origin=self.show_origin,
+            show_stats=self.show_stats,
+        )
+        copied.initial_camera_state = self.initial_camera_state
+        copied.viewer_rotation_x_degrees = self.viewer_rotation_x_degrees
+        copied.viewer_rotation_y_degrees = self.viewer_rotation_y_degrees
+        copied.viewer_rotation_z_degrees = self.viewer_rotation_z_degrees
+        copied.origin = self.origin
+        return copied
 
 
 def _normalize_frame(
@@ -1011,7 +1073,7 @@ class _NativeViewerAnyWidget(anywidget.AnyWidget):
         )
 
 
-class NativeViewerWidget(_StableMarimoAnyWidget):
+class MarimoViewer(_StableMarimoAnyWidget):
     """Marimo-reactive native viewer widget."""
 
     def __init__(
@@ -1021,7 +1083,7 @@ class NativeViewerWidget(_StableMarimoAnyWidget):
         interactive_quality: int,
         settled_quality: Literal["jpeg_95", "jpeg_100", "png"],
         interactive_max_side: int | None,
-        state: NativeViewerState | None,
+        state: ViewerState | None,
         raise_on_error: bool,
     ) -> None:
         super().__init__(anywidget_instance)
@@ -1538,19 +1600,19 @@ class NativeViewerWidget(_StableMarimoAnyWidget):
         self._run_on_main_loop(_apply_rendering_update)
 
 
-def native_viewer(
+def marimo_viewer(
     render_fn: Callable[[CameraState], np.ndarray | torch.Tensor],
     *,
-    aspect_ratio: float = 16.3 / 9.0,
-    interactive_quality: int = 50,
-    settled_quality: Literal["jpeg_95", "jpeg_100", "png"] = "jpeg_100",
-    interactive_max_side: int | None = 1980,
-    camera_convention: CameraConvention = "opencv",
+    aspect_ratio: float | None = None,
+    interactive_quality: int | None = None,
+    settled_quality: Literal["jpeg_95", "jpeg_100", "png"] | None = None,
+    interactive_max_side: int | None = None,
+    camera_convention: CameraConvention | None = None,
     initial_view: CameraState | None = None,
-    state: NativeViewerState | None = None,
-    raise_on_error: bool = True,
-) -> NativeViewerWidget:
-    """Create a native image-based 3D viewer for marimo notebooks.
+    state: ViewerState | None = None,
+    raise_on_error: bool | None = None,
+) -> MarimoViewer:
+    """Create a marimo-backed image-based 3D viewer.
 
     The render size comes from the measured notebook layout. `aspect_ratio`
     controls the initial widget height before the first render and resize
@@ -1558,7 +1620,7 @@ def native_viewer(
     and nominal viewport size before the widget measures the live layout.
     `camera_convention` controls the default convention when no explicit camera
     state is provided via `initial_view` or `state`. Axis-gizmo visibility is
-    stored in `NativeViewerState.show_axes`. Reuse the same `state` object
+    stored in `ViewerState.show_axes`. Reuse the same `state` object
     across reruns to persist the camera state and last click even when
     `render_fn` is recreated. `interactive_max_side` caps the larger image axis
     during motion renders while keeping settled renders at full resolution;
@@ -1579,61 +1641,64 @@ def native_viewer(
     that stay below the drag threshold; orbiting and panning do not register as
     clicks.
     """
-    if aspect_ratio <= 0.0:
-        raise ValueError(f"aspect_ratio must be positive, got {aspect_ratio}.")
-    if not 1 <= interactive_quality <= 100:
-        raise ValueError(
-            "interactive_quality must be in [1, 100], "
-            f"got {interactive_quality}."
+    if state is None:
+        state = ViewerState(
+            camera_state=initial_view,
+            camera_convention=camera_convention or "opencv",
+            aspect_ratio=aspect_ratio
+            if aspect_ratio is not None
+            else 16.3 / 9.0,
+            interactive_quality=(
+                interactive_quality if interactive_quality is not None else 50
+            ),
+            settled_quality=(
+                settled_quality if settled_quality is not None else "jpeg_100"
+            ),
+            interactive_max_side=(
+                interactive_max_side
+                if interactive_max_side is not None
+                else 1980
+            ),
+            raise_on_error=(
+                raise_on_error if raise_on_error is not None else True
+            ),
         )
-    if interactive_max_side is not None and interactive_max_side <= 0:
-        raise ValueError(
-            "interactive_max_side must be None or a positive integer, "
-            f"got {interactive_max_side}."
-        )
-    resolved_camera_state = (
-        state.camera_state
-        if state is not None
-        else initial_view
-        or CameraState.default(camera_convention=camera_convention)
-    )
-    resolved_show_axes = state.show_axes if state is not None else False
-    resolved_show_horizon = state.show_horizon if state is not None else False
-    resolved_show_origin = state.show_origin if state is not None else False
-    resolved_show_stats = state.show_stats if state is not None else False
+    elif initial_view is not None:
+        state.set_camera(initial_view)
+
+    resolved_camera_state = state.camera_state
     stream_server = _get_frame_stream_server()
     stream_id, stream_token = stream_server.register_stream()
     anywidget_instance = _NativeViewerAnyWidget(
         camera_state=resolved_camera_state,
-        aspect_ratio=aspect_ratio,
-        show_axes=resolved_show_axes,
-        show_horizon=resolved_show_horizon,
-        show_origin=resolved_show_origin,
-        show_stats=resolved_show_stats,
-        viewer_rotation_x_degrees=(
-            state.viewer_rotation_x_degrees if state is not None else 0.0
-        ),
-        viewer_rotation_y_degrees=(
-            state.viewer_rotation_y_degrees if state is not None else 0.0
-        ),
-        viewer_rotation_z_degrees=(
-            state.viewer_rotation_z_degrees if state is not None else 0.0
-        ),
-        origin_x=(state.origin[0] if state is not None else 0.0),
-        origin_y=(state.origin[1] if state is not None else 0.0),
-        origin_z=(state.origin[2] if state is not None else 0.0),
+        aspect_ratio=state.aspect_ratio,
+        show_axes=state.show_axes,
+        show_horizon=state.show_horizon,
+        show_origin=state.show_origin,
+        show_stats=state.show_stats,
+        viewer_rotation_x_degrees=state.viewer_rotation_x_degrees,
+        viewer_rotation_y_degrees=state.viewer_rotation_y_degrees,
+        viewer_rotation_z_degrees=state.viewer_rotation_z_degrees,
+        origin_x=state.origin[0],
+        origin_y=state.origin[1],
+        origin_z=state.origin[2],
         stream_port=stream_server.port,
         stream_path=f"/streams/{stream_id}",
         stream_token=stream_token,
     )
-    if state is not None and state.last_click is not None:
+    if state.last_click is not None:
         anywidget_instance.last_click_json = state.last_click.to_json()
-    return NativeViewerWidget(
+    return MarimoViewer(
         anywidget_instance,
         render_fn=render_fn,
-        interactive_quality=interactive_quality,
-        settled_quality=settled_quality,
-        interactive_max_side=interactive_max_side,
+        interactive_quality=state.interactive_quality,
+        settled_quality=state.settled_quality,
+        interactive_max_side=state.interactive_max_side,
         state=state,
-        raise_on_error=raise_on_error,
+        raise_on_error=state.raise_on_error,
     )
+
+
+NativeViewerState = ViewerState
+NativeViewerWidget = MarimoViewer
+native_viewer = marimo_viewer

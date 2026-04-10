@@ -22,7 +22,7 @@ import numpy as np
 from pydantic import BaseModel
 
 from marimo_3dv.pipeline.context import ViewerContext
-from marimo_3dv.viewer.widget import CameraState, NativeViewerState
+from marimo_3dv.viewer.widget import CameraState, ViewerState
 
 RenderDataT = TypeVar("RenderDataT")
 
@@ -91,7 +91,7 @@ class _PipelineRuntimeState(Generic[RenderDataT]):
     op_configs: dict[str, type[BaseModel]]
     op_runtime_states: dict[str, Any]
     render_data: RenderDataT
-    viewer_state: NativeViewerState
+    viewer_state: ViewerState
     prepared_render_data: RenderDataT | None = None
     prepare_cache_key: str | None = None
 
@@ -308,7 +308,7 @@ class GuiPipeline(Generic[RenderDataT]):
             .pipe(paint_ray_op())
         )
         result = pipeline.build(render_data, viewer_state)
-        viewer = native_viewer(
+        viewer = Viewer(
             result.bind(config_gui.value, backend_fn=rasterize),
             state=viewer_state,
         )
@@ -336,7 +336,7 @@ class GuiPipeline(Generic[RenderDataT]):
     def build(
         self,
         render_data: RenderDataT,
-        viewer_state: NativeViewerState,
+        viewer_state: ViewerState,
     ) -> GuiPipelineResult[RenderDataT]:
         """Build the pipeline, instantiating runtime state and merging configs.
 

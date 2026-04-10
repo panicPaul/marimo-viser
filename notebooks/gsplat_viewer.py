@@ -39,14 +39,13 @@ with app.setup:
     from marimo_3dv import (
         CameraState,
         GuiPipeline,
-        NativeViewerState,
         RenderResult,
-        desktop_viewer,
+        Viewer,
+        ViewerState,
         filter_opacity_op,
         filter_size_op,
         form_gui,
         max_sh_degree_op,
-        native_viewer,
         show_distribution_op,
     )
 
@@ -75,7 +74,11 @@ def _(load_form):
 
 @app.cell
 def _():
-    viewer_state = NativeViewerState()
+    viewer_state = ViewerState(
+        camera_convention="opencv",
+        interactive_quality=50,
+        interactive_max_side=1980,
+    )
     return (viewer_state,)
 
 
@@ -125,58 +128,16 @@ def _(pipeline_config_gui, pipeline_result, viewer_state):
         pipeline_config_gui.value or pipeline_result.default_config,
         backend_fn=rasterize_scene,
     )
-    if mo.running_in_notebook():
-        viewer = native_viewer(
-            lambda cam: render_fn(cam).image,
-            state=viewer_state,
-            camera_convention="opencv",
-            interactive_quality=50,
-            interactive_max_side=1980,
-        )
-    else:
-        viewer = desktop_viewer(
-            lambda cam: render_fn(cam).image,
-            state=viewer_state,
-        )
-        viewer.run()
-    return render_fn, viewer
+    viewer = Viewer(
+        lambda cam: render_fn(cam).image,
+        state=viewer_state,
+    )
+    return (viewer,)
 
 
 @app.cell
 def _(viewer):
     viewer
-    return
-
-
-@app.cell
-def _(scene):
-    scene
-    return
-
-
-@app.cell(hide_code=True)
-def _():
-    mo.md("""
-    ## Viewer Debug
-    """)
-    return
-
-
-@app.cell
-def _(render_fn, scene, viewer):
-    debug_comparison = None
-    if scene is not None:
-        try:
-            camera_state = viewer.get_camera_state()
-            pipeline_image = render_fn(camera_state).image
-            snapshot_image = np.asarray(viewer.get_snapshot())
-            debug_comparison = {
-                "same_shape": pipeline_image.shape == snapshot_image.shape,
-                "identical": np.array_equal(pipeline_image, snapshot_image),
-            }
-        except RuntimeError as error:
-            debug_comparison = {"snapshot_error": str(error)}
-    debug_comparison
     return
 
 

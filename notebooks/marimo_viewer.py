@@ -9,7 +9,7 @@
 # [tool.uv.sources]
 # marimo-3dv = { path = "..", editable = true }
 # ///
-"""Example marimo notebook for the native viewer widget."""
+"""Example marimo notebook for the unified viewer."""
 # NOTE: needs to be exectued from this directory if executed with uvx!!!
 
 import marimo
@@ -25,12 +25,15 @@ with app.setup:
     import torch
     from rich import print
 
-    from marimo_3dv import CameraState, NativeViewerState, native_viewer
+    from marimo_3dv import CameraState, Viewer, ViewerState
 
 
 @app.cell
 def _():
-    viewer_state = NativeViewerState()
+    viewer_state = ViewerState(
+        interactive_quality=50,
+        interactive_max_side=1980,
+    )
     return (viewer_state,)
 
 
@@ -44,13 +47,7 @@ def _():
 
 @app.cell
 def _(viewer_render_fn, viewer_state):
-    viewer = native_viewer(
-        viewer_render_fn,
-        interactive_quality=50,
-        interactive_max_side=1980,
-        state=viewer_state,
-        # settled_quality='png'
-    )
+    viewer = Viewer(viewer_render_fn, state=viewer_state)
     viewer
     return (viewer,)
 

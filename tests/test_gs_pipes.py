@@ -17,7 +17,7 @@ from marimo_3dv.ops.gs import (
 )
 from marimo_3dv.pipeline.context import ViewerContext
 from marimo_3dv.pipeline.gui import RenderResult
-from marimo_3dv.viewer.widget import NativeViewerState
+from marimo_3dv.viewer.widget import ViewerState
 
 # ---------------------------------------------------------------------------
 # Minimal fake SplatRenderData for testing
@@ -57,7 +57,7 @@ def _make_splats(
 
 
 def _context() -> ViewerContext:
-    return ViewerContext(viewer_state=NativeViewerState(), last_click=None)
+    return ViewerContext(viewer_state=ViewerState(), last_click=None)
 
 
 # ---------------------------------------------------------------------------

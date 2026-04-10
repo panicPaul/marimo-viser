@@ -9,7 +9,7 @@ from pydantic import BaseModel
 
 from marimo_3dv.pipeline.context import ViewerContext
 from marimo_3dv.pipeline.gui import GuiOp, GuiPipeline, RenderResult
-from marimo_3dv.viewer.widget import NativeViewerState
+from marimo_3dv.viewer.widget import ViewerState
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -20,8 +20,8 @@ class EmptyConfig(BaseModel):
     pass
 
 
-def _make_viewer_state() -> NativeViewerState:
-    return NativeViewerState()
+def _make_viewer_state() -> ViewerState:
+    return ViewerState()
 
 
 def _dummy_image(h: int = 4, w: int = 4) -> np.ndarray:

@@ -10,14 +10,14 @@ import torch
 
 from marimo_3dv import (
     CameraState,
-    NativeViewerState,
     ViewerClick,
-    native_viewer,
+    ViewerState,
 )
 from marimo_3dv.viewer.widget import (
     _convert_cam_to_world_between_conventions,
     _LatestOnlyRenderer,
     _normalize_frame,
+    marimo_viewer,
 )
 
 
@@ -58,8 +58,8 @@ def test_default_camera_state_uses_proper_rotation_matrix() -> None:
     assert np.allclose(rotation[:, 1], np.array([0.0, 1.0, 0.0]))
 
 
-def test_native_viewer_state_defaults_show_axes_and_hides_guides() -> None:
-    state = NativeViewerState()
+def test_viewer_state_defaults_show_axes_and_hides_guides() -> None:
+    state = ViewerState()
 
     assert state.show_axes is True
     assert state.show_horizon is False
@@ -67,8 +67,8 @@ def test_native_viewer_state_defaults_show_axes_and_hides_guides() -> None:
     assert state.show_stats is False
 
 
-def test_native_viewer_state_overlay_setters_are_fluent() -> None:
-    state = NativeViewerState()
+def test_viewer_state_overlay_setters_are_fluent() -> None:
+    state = ViewerState()
 
     chained_state = (
         state.set_show_axes(False)
@@ -174,8 +174,8 @@ def test_viewer_click_json_round_trip() -> None:
     assert restored.camera_state.height == 24
 
 
-def test_native_viewer_last_click_reads_synced_widget_state() -> None:
-    viewer = native_viewer(
+def test_viewer_last_click_reads_synced_widget_state() -> None:
+    viewer = marimo_viewer(
         lambda state: np.zeros((state.height, state.width, 3), dtype=np.uint8)
     )
     click = ViewerClick(
@@ -200,8 +200,8 @@ def test_native_viewer_last_click_reads_synced_widget_state() -> None:
     assert viewer.get_last_click().x == click.x
 
 
-def test_native_viewer_get_snapshot_decodes_latest_frame() -> None:
-    viewer = native_viewer(
+def test_viewer_get_snapshot_decodes_latest_frame() -> None:
+    viewer = marimo_viewer(
         lambda state: np.zeros((state.height, state.width, 3), dtype=np.uint8)
     )
     viewer._latest_frame_array = np.full(
@@ -216,8 +216,8 @@ def test_native_viewer_get_snapshot_decodes_latest_frame() -> None:
     assert snapshot.mode == "RGB"
 
 
-def test_native_viewer_get_snapshot_requires_available_frame() -> None:
-    viewer = native_viewer(
+def test_viewer_get_snapshot_requires_available_frame() -> None:
+    viewer = marimo_viewer(
         lambda state: np.zeros((state.height, state.width, 3), dtype=np.uint8)
     )
     viewer._latest_frame_array = None
@@ -299,8 +299,8 @@ def test_latest_only_renderer_drops_stale_results() -> None:
     _wait_until(lambda: published == [(2, 20)])
 
 
-def test_native_viewer_set_camera_state_updates_widget_state() -> None:
-    viewer = native_viewer(
+def test_marimo_viewer_set_camera_state_updates_widget_state() -> None:
+    viewer = marimo_viewer(
         lambda state: np.zeros((state.height, state.width, 3), dtype=np.uint8),
         initial_view=CameraState.default(width=64, height=48),
     )
@@ -313,11 +313,9 @@ def test_native_viewer_set_camera_state_updates_widget_state() -> None:
     assert viewer.get_camera_state().fov_degrees == 45.0
 
 
-def test_native_viewer_reuses_explicit_state_across_reruns() -> None:
-    state = NativeViewerState(
-        camera_state=CameraState.default(width=64, height=48)
-    )
-    first_viewer = native_viewer(
+def test_marimo_viewer_reuses_explicit_state_across_reruns() -> None:
+    state = ViewerState(camera_state=CameraState.default(width=64, height=48))
+    first_viewer = marimo_viewer(
         lambda camera_state: np.zeros(
             (camera_state.height, camera_state.width, 3), dtype=np.uint8
         ),
@@ -329,7 +327,7 @@ def test_native_viewer_reuses_explicit_state_across_reruns() -> None:
 
     first_viewer.set_camera_state(updated_camera_state)
 
-    second_viewer = native_viewer(
+    second_viewer = marimo_viewer(
         lambda camera_state: np.zeros(
             (camera_state.height, camera_state.width, 3), dtype=np.uint8
         ),
@@ -341,10 +339,10 @@ def test_native_viewer_reuses_explicit_state_across_reruns() -> None:
     assert second_viewer.get_camera_state().fov_degrees == 45.0
 
 
-def test_native_viewer_state_can_reset_camera_to_initial_value() -> None:
+def test_viewer_state_can_reset_camera_to_initial_value() -> None:
     initial = CameraState.default(width=64, height=48, fov_degrees=60.0)
-    state = NativeViewerState(camera_state=initial)
-    viewer = native_viewer(
+    state = ViewerState(camera_state=initial)
+    viewer = marimo_viewer(
         lambda camera_state: np.zeros(
             (camera_state.height, camera_state.width, 3), dtype=np.uint8
         ),
@@ -364,10 +362,10 @@ def test_native_viewer_state_can_reset_camera_to_initial_value() -> None:
     assert state.camera_state.fov_degrees == 60.0
 
 
-def test_native_viewer_reuses_show_axes_from_explicit_state() -> None:
-    state = NativeViewerState(show_axes=True)
+def test_marimo_viewer_reuses_show_axes_from_explicit_state() -> None:
+    state = ViewerState(show_axes=True)
 
-    first_viewer = native_viewer(
+    first_viewer = marimo_viewer(
         lambda camera_state: np.zeros(
             (camera_state.height, camera_state.width, 3), dtype=np.uint8
         ),
@@ -376,7 +374,7 @@ def test_native_viewer_reuses_show_axes_from_explicit_state() -> None:
     assert first_viewer.anywidget().show_axes is True
 
     state.show_axes = False
-    second_viewer = native_viewer(
+    second_viewer = marimo_viewer(
         lambda camera_state: np.zeros(
             (camera_state.height, camera_state.width, 3), dtype=np.uint8
         ),
@@ -386,8 +384,8 @@ def test_native_viewer_reuses_show_axes_from_explicit_state() -> None:
     assert second_viewer.anywidget().show_axes is False
 
 
-def test_native_viewer_get_debug_info_reads_synced_metrics() -> None:
-    viewer = native_viewer(
+def test_marimo_viewer_get_debug_info_reads_synced_metrics() -> None:
+    viewer = marimo_viewer(
         lambda state: np.zeros((state.height, state.width, 3), dtype=np.uint8)
     )
     widget = viewer.anywidget()
@@ -432,33 +430,33 @@ def test_native_viewer_get_debug_info_reads_synced_metrics() -> None:
     }
 
 
-def test_native_viewer_exposes_configured_aspect_ratio() -> None:
-    viewer = native_viewer(
+def test_marimo_viewer_exposes_configured_aspect_ratio() -> None:
+    viewer = marimo_viewer(
         lambda state: np.zeros((state.height, state.width, 3), dtype=np.uint8),
-        aspect_ratio=2.0,
+        state=ViewerState(aspect_ratio=2.0),
     )
 
     assert viewer.anywidget().aspect_ratio == 2.0
 
 
-def test_native_viewer_uses_requested_default_camera_convention() -> None:
-    viewer = native_viewer(
+def test_marimo_viewer_uses_requested_default_camera_convention() -> None:
+    viewer = marimo_viewer(
         lambda state: np.zeros((state.height, state.width, 3), dtype=np.uint8),
-        camera_convention="opengl",
+        state=ViewerState(camera_convention="opengl"),
     )
 
     assert viewer.get_camera_state().camera_convention == "opengl"
 
 
-def test_native_viewer_caps_motion_render_larger_axis_only() -> None:
+def test_marimo_viewer_caps_motion_render_larger_axis_only() -> None:
     rendered_sizes: list[tuple[int, int, bool]] = []
-    viewer = native_viewer(
+    viewer = marimo_viewer(
         lambda state: (
             rendered_sizes.append((state.width, state.height, True))
             or np.zeros((state.height, state.width, 3), dtype=np.uint8)
         ),
         initial_view=CameraState.default(width=100, height=80),
-        interactive_max_side=50,
+        state=ViewerState(interactive_max_side=50),
     )
     rendered_sizes.clear()
     viewer.anywidget().interaction_active = True
@@ -476,19 +474,19 @@ def test_native_viewer_caps_motion_render_larger_axis_only() -> None:
     assert viewer.get_camera_state().height == 80
 
 
-def test_native_viewer_render_errors_raise_by_default() -> None:
+def test_marimo_viewer_render_errors_raise_by_default() -> None:
     with pytest.raises(RuntimeError, match="boom"):
-        native_viewer(
+        marimo_viewer(
             lambda state: (_ for _ in ()).throw(RuntimeError("boom")),
             initial_view=CameraState.default(width=40, height=30),
         )
 
 
-def test_native_viewer_can_surface_render_errors_in_widget_state() -> None:
-    viewer = native_viewer(
+def test_marimo_viewer_can_surface_render_errors_in_widget_state() -> None:
+    viewer = marimo_viewer(
         lambda state: (_ for _ in ()).throw(RuntimeError("boom")),
         initial_view=CameraState.default(width=40, height=30),
-        raise_on_error=False,
+        state=ViewerState(raise_on_error=False),
     )
 
     viewer.rerender()
@@ -496,42 +494,27 @@ def test_native_viewer_can_surface_render_errors_in_widget_state() -> None:
     _wait_until(lambda: "RuntimeError: boom" in viewer.anywidget().error_text)
 
 
-def test_native_viewer_rejects_non_positive_aspect_ratio() -> None:
+def test_viewer_state_rejects_non_positive_aspect_ratio() -> None:
     with pytest.raises(ValueError, match="aspect_ratio must be positive"):
-        native_viewer(
-            lambda state: np.zeros(
-                (state.height, state.width, 3), dtype=np.uint8
-            ),
-            aspect_ratio=0.0,
-        )
+        ViewerState(aspect_ratio=0.0)
 
 
-def test_native_viewer_rejects_out_of_range_interactive_quality() -> None:
+def test_viewer_state_rejects_out_of_range_interactive_quality() -> None:
     with pytest.raises(ValueError, match="interactive_quality must be in"):
-        native_viewer(
-            lambda state: np.zeros(
-                (state.height, state.width, 3), dtype=np.uint8
-            ),
-            interactive_quality=0,
-        )
+        ViewerState(interactive_quality=0)
 
 
-def test_native_viewer_rejects_non_positive_interactive_max_side() -> None:
+def test_viewer_state_rejects_non_positive_interactive_max_side() -> None:
     with pytest.raises(
         ValueError, match="interactive_max_side must be None or a positive"
     ):
-        native_viewer(
-            lambda state: np.zeros(
-                (state.height, state.width, 3), dtype=np.uint8
-            ),
-            interactive_max_side=0,
-        )
+        ViewerState(interactive_max_side=0)
 
 
-def test_native_viewer_accepts_none_interactive_max_side() -> None:
-    viewer = native_viewer(
+def test_viewer_state_accepts_none_interactive_max_side() -> None:
+    viewer = marimo_viewer(
         lambda state: np.zeros((state.height, state.width, 3), dtype=np.uint8),
-        interactive_max_side=None,
+        state=ViewerState(interactive_max_side=None),
     )
 
     assert viewer is not None

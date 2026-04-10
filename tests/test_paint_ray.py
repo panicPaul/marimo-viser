@@ -66,14 +66,14 @@ def test_paint_ray_op_returns_guiop():
 def test_paint_ray_stores_ray_on_click():
     from marimo_3dv.pipeline.context import ViewerContext
     from marimo_3dv.pipeline.gui import RenderResult
-    from marimo_3dv.viewer.widget import NativeViewerState, ViewerClick
+    from marimo_3dv.viewer.widget import ViewerClick, ViewerState
 
     cam = _forward_camera()
     click = ViewerClick(
         x=32, y=24, width=cam.width, height=cam.height, camera_state=cam
     )
 
-    viewer_state = NativeViewerState()
+    viewer_state = ViewerState()
     viewer_state.last_click = click
     context = ViewerContext(viewer_state=viewer_state, last_click=click)
 
@@ -91,7 +91,7 @@ def test_paint_ray_stores_ray_on_click():
 def test_paint_ray_respects_max_rays():
     from marimo_3dv.pipeline.context import ViewerContext
     from marimo_3dv.pipeline.gui import RenderResult
-    from marimo_3dv.viewer.widget import NativeViewerState, ViewerClick
+    from marimo_3dv.viewer.widget import ViewerClick, ViewerState
 
     cam = _forward_camera()
     runtime_state = _PaintRayState()
@@ -106,7 +106,7 @@ def test_paint_ray_respects_max_rays():
             height=cam.height,
             camera_state=cam,
         )
-        viewer_state = NativeViewerState()
+        viewer_state = ViewerState()
         viewer_state.last_click = click
         context = ViewerContext(viewer_state=viewer_state, last_click=click)
         result = RenderResult(image=image.copy())
@@ -118,13 +118,13 @@ def test_paint_ray_respects_max_rays():
 def test_paint_ray_disabled_returns_unchanged():
     from marimo_3dv.pipeline.context import ViewerContext
     from marimo_3dv.pipeline.gui import RenderResult
-    from marimo_3dv.viewer.widget import NativeViewerState, ViewerClick
+    from marimo_3dv.viewer.widget import ViewerClick, ViewerState
 
     cam = _forward_camera()
     click = ViewerClick(
         x=0, y=0, width=cam.width, height=cam.height, camera_state=cam
     )
-    viewer_state = NativeViewerState()
+    viewer_state = ViewerState()
     viewer_state.last_click = click
     context = ViewerContext(viewer_state=viewer_state, last_click=click)
     runtime_state = _PaintRayState()

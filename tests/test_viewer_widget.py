@@ -51,6 +51,32 @@ def test_camera_state_json_round_trip() -> None:
     assert np.allclose(restored.cam_to_world, state.cam_to_world)
 
 
+def test_default_camera_state_uses_proper_rotation_matrix() -> None:
+    rotation = CameraState.default().cam_to_world[:3, :3]
+
+    assert np.isclose(np.linalg.det(rotation), 1.0)
+    assert np.allclose(rotation[:, 1], np.array([0.0, 1.0, 0.0]))
+
+
+def test_native_viewer_state_defaults_show_axes_and_hides_guides() -> None:
+    state = NativeViewerState()
+
+    assert state.show_axes is True
+    assert state.show_horizon is False
+    assert state.show_origin is False
+
+
+def test_camera_state_with_convention_round_trips() -> None:
+    state = CameraState.default(width=48, height=32, camera_convention="opencv")
+
+    converted = state.with_convention("opengl")
+    restored = converted.with_convention("opencv")
+
+    assert converted.camera_convention == "opengl"
+    assert restored.camera_convention == "opencv"
+    assert np.allclose(restored.cam_to_world, state.cam_to_world)
+
+
 @pytest.mark.parametrize(
     "camera_convention",
     ["opencv", "opengl", "blender", "colmap"],
@@ -295,6 +321,51 @@ def test_native_viewer_reuses_explicit_state_across_reruns() -> None:
     assert second_viewer.get_camera_state().fov_degrees == 45.0
 
 
+def test_native_viewer_state_can_reset_camera_to_initial_value() -> None:
+    initial = CameraState.default(width=64, height=48, fov_degrees=60.0)
+    state = NativeViewerState(camera_state=initial)
+    viewer = native_viewer(
+        lambda camera_state: np.zeros(
+            (camera_state.height, camera_state.width, 3), dtype=np.uint8
+        ),
+        state=state,
+    )
+    viewer.set_camera_state(
+        CameraState.default(width=32, height=24, fov_degrees=45.0)
+    )
+
+    state.reset_camera()
+
+    assert viewer.get_camera_state().width == 64
+    assert viewer.get_camera_state().height == 48
+    assert viewer.get_camera_state().fov_degrees == 60.0
+    assert state.camera_state.width == 64
+    assert state.camera_state.height == 48
+    assert state.camera_state.fov_degrees == 60.0
+
+
+def test_native_viewer_reuses_show_axes_from_explicit_state() -> None:
+    state = NativeViewerState(show_axes=True)
+
+    first_viewer = native_viewer(
+        lambda camera_state: np.zeros(
+            (camera_state.height, camera_state.width, 3), dtype=np.uint8
+        ),
+        state=state,
+    )
+    assert first_viewer.anywidget().show_axes is True
+
+    state.show_axes = False
+    second_viewer = native_viewer(
+        lambda camera_state: np.zeros(
+            (camera_state.height, camera_state.width, 3), dtype=np.uint8
+        ),
+        state=state,
+    )
+
+    assert second_viewer.anywidget().show_axes is False
+
+
 def test_native_viewer_get_debug_info_reads_synced_metrics() -> None:
     viewer = native_viewer(
         lambda state: np.zeros((state.height, state.width, 3), dtype=np.uint8)
@@ -350,6 +421,15 @@ def test_native_viewer_exposes_configured_aspect_ratio() -> None:
     assert viewer.anywidget().aspect_ratio == 2.0
 
 
+def test_native_viewer_uses_requested_default_camera_convention() -> None:
+    viewer = native_viewer(
+        lambda state: np.zeros((state.height, state.width, 3), dtype=np.uint8),
+        camera_convention="opengl",
+    )
+
+    assert viewer.get_camera_state().camera_convention == "opengl"
+
+
 def test_native_viewer_downscales_motion_renders_only() -> None:
     rendered_sizes: list[tuple[int, int, bool]] = []
     viewer = native_viewer(
@@ -360,6 +440,7 @@ def test_native_viewer_downscales_motion_renders_only() -> None:
         initial_view=CameraState.default(width=100, height=80),
         interactive_scale=0.5,
     )
+    rendered_sizes.clear()
     viewer.anywidget().interaction_active = True
 
     viewer.rerender()
@@ -375,10 +456,19 @@ def test_native_viewer_downscales_motion_renders_only() -> None:
     assert viewer.get_camera_state().height == 80
 
 
-def test_native_viewer_render_errors_surface_in_widget_state() -> None:
+def test_native_viewer_render_errors_raise_by_default() -> None:
+    with pytest.raises(RuntimeError, match="boom"):
+        native_viewer(
+            lambda state: (_ for _ in ()).throw(RuntimeError("boom")),
+            initial_view=CameraState.default(width=40, height=30),
+        )
+
+
+def test_native_viewer_can_surface_render_errors_in_widget_state() -> None:
     viewer = native_viewer(
         lambda state: (_ for _ in ()).throw(RuntimeError("boom")),
         initial_view=CameraState.default(width=40, height=30),
+        raise_on_error=False,
     )
 
     viewer.rerender()

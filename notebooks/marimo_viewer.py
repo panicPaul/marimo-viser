@@ -36,7 +36,9 @@ def _():
 
 @app.cell
 def _():
-    viewer_render_fn = partial(render_fn, noise=0.5, noise_kind="blue")
+    viewer_render_fn = partial(
+        render_fn, noise=0.5, noise_kind="blue", throw_error=False
+    )
     return (viewer_render_fn,)
 
 
@@ -51,6 +53,12 @@ def _(viewer_render_fn, viewer_state):
     )
     viewer
     return (viewer,)
+
+
+@app.cell
+def _(viewer):
+    viewer.get_debug_info()["error_text"]
+    return
 
 
 @app.cell
@@ -98,6 +106,7 @@ def render_fn(
     camera_state: CameraState,
     noise: float = 0.0,
     noise_kind: Literal["white", "blue"] = "white",
+    throw_error: bool = False,
 ) -> torch.Tensor:
     """Render a ray-direction visualization with deterministic directional noise."""
     device = torch.device("cuda")
@@ -178,6 +187,10 @@ def render_fn(
         ).clamp_min(1e-4)
     else:
         directional_noise = white_noise
+
+    if throw_error:
+        raise ValueError("This is a crash test.")
+
     return ((base_image + directional_noise * noise).clip(0, 1) * 255.0).to(
         torch.uint8
     )

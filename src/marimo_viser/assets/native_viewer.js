@@ -37,7 +37,7 @@ function lookAtCamera(position, target, upDirection) {
     right = cross(forward, [0, 0, 1]);
   }
   right = normalize(right);
-  const up = normalize(cross(right, forward));
+  const up = normalize(cross(forward, right));
   return [
     [right[0], up[0], forward[0], position[0]],
     [right[1], up[1], forward[1], position[1]],
@@ -48,6 +48,10 @@ function lookAtCamera(position, target, upDirection) {
 
 function matrixColumn(matrix, index) {
   return [matrix[0][index], matrix[1][index], matrix[2][index]];
+}
+
+function dot(a, b) {
+  return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 }
 
 function conventionRotation(cameraConvention) {
@@ -92,6 +96,61 @@ function multiplyMat3(a, b) {
     }
   }
   return result;
+}
+
+function multiplyMat3Vec3(matrix, vector) {
+  return [
+    matrix[0][0] * vector[0] + matrix[0][1] * vector[1] + matrix[0][2] * vector[2],
+    matrix[1][0] * vector[0] + matrix[1][1] * vector[1] + matrix[1][2] * vector[2],
+    matrix[2][0] * vector[0] + matrix[2][1] * vector[1] + matrix[2][2] * vector[2],
+  ];
+}
+
+function axisAngleRotation(axis, angleRadians) {
+  const [x, y, z] = normalize(axis);
+  const c = Math.cos(angleRadians);
+  const s = Math.sin(angleRadians);
+  const t = 1.0 - c;
+  return [
+    [t * x * x + c, t * x * y - s * z, t * x * z + s * y],
+    [t * x * y + s * z, t * y * y + c, t * y * z - s * x],
+    [t * x * z - s * y, t * y * z + s * x, t * z * z + c],
+  ];
+}
+
+function rotationFromCamToWorld(camToWorld) {
+  return [
+    [camToWorld[0][0], camToWorld[0][1], camToWorld[0][2]],
+    [camToWorld[1][0], camToWorld[1][1], camToWorld[1][2]],
+    [camToWorld[2][0], camToWorld[2][1], camToWorld[2][2]],
+  ];
+}
+
+function rotationMatrixXYZ(xDegrees, yDegrees, zDegrees) {
+  const [xRadians, yRadians, zRadians] = [xDegrees, yDegrees, zDegrees]
+    .map((degrees) => degrees * Math.PI / 180.0);
+  const cx = Math.cos(xRadians);
+  const sx = Math.sin(xRadians);
+  const cy = Math.cos(yRadians);
+  const sy = Math.sin(yRadians);
+  const cz = Math.cos(zRadians);
+  const sz = Math.sin(zRadians);
+  const rotationX = [
+    [1, 0, 0],
+    [0, cx, -sx],
+    [0, sx, cx],
+  ];
+  const rotationY = [
+    [cy, 0, sy],
+    [0, 1, 0],
+    [-sy, 0, cy],
+  ];
+  const rotationZ = [
+    [cz, -sz, 0],
+    [sz, cz, 0],
+    [0, 0, 1],
+  ];
+  return multiplyMat3(rotationZ, multiplyMat3(rotationY, rotationX));
 }
 
 function convertCamToWorldConvention(
@@ -184,6 +243,22 @@ function render({ model, el }) {
 
   overlay.appendChild(latencyBadge);
   root.appendChild(overlay);
+
+  const axesCanvas = document.createElement("canvas");
+  axesCanvas.className = "native-viewer-axes";
+  root.appendChild(axesCanvas);
+  const axesContext = axesCanvas.getContext("2d");
+  if (axesContext === null) {
+    throw new Error("Failed to acquire 2D axis canvas context.");
+  }
+
+  const guidesCanvas = document.createElement("canvas");
+  guidesCanvas.className = "native-viewer-guides";
+  root.appendChild(guidesCanvas);
+  const guidesContext = guidesCanvas.getContext("2d");
+  if (guidesContext === null) {
+    throw new Error("Failed to acquire 2D guides canvas context.");
+  }
   el.appendChild(root);
 
   let cameraState = parseCameraState(model.get("camera_state_json"));
@@ -234,6 +309,202 @@ function render({ model, el }) {
   let bestClockSyncRttMs = null;
   let backendClockOffsetMs = null;
   const pendingClockSyncPings = new Map();
+
+  function setCameraRotation(rotation) {
+    cameraState.cam_to_world = [
+      [rotation[0][0], rotation[0][1], rotation[0][2], position[0]],
+      [rotation[1][0], rotation[1][1], rotation[1][2], position[1]],
+      [rotation[2][0], rotation[2][1], rotation[2][2], position[2]],
+      [0, 0, 0, 1],
+    ];
+  }
+
+  function viewerFrameRotation() {
+    return rotationMatrixXYZ(
+      Number(model.get("viewer_rotation_x_degrees")) || 0.0,
+      Number(model.get("viewer_rotation_y_degrees")) || 0.0,
+      Number(model.get("viewer_rotation_z_degrees")) || 0.0,
+    );
+  }
+
+  function viewerUpVector() {
+    return normalize(
+      multiplyMat3Vec3(viewerFrameRotation(), [0, -1, 0]),
+    );
+  }
+
+  function drawAxesGizmo() {
+    const shouldShowAxes = Boolean(model.get("show_axes"));
+    axesCanvas.hidden = !shouldShowAxes;
+    if (!shouldShowAxes) {
+      return;
+    }
+
+    const size = 96;
+    const dpr = window.devicePixelRatio || 1;
+    axesCanvas.width = Math.round(size * dpr);
+    axesCanvas.height = Math.round(size * dpr);
+    axesCanvas.style.width = `${size}px`;
+    axesCanvas.style.height = `${size}px`;
+    axesContext.setTransform(dpr, 0, 0, dpr, 0, 0);
+    axesContext.clearRect(0, 0, size, size);
+
+    const centerX = size / 2;
+    const centerY = size / 2;
+    const axisLength = 28;
+    const markerRadius = 4;
+    const viewRotation = cameraState.cam_to_world;
+    const frameRotation = viewerFrameRotation();
+    const cameraRight = matrixColumn(viewRotation, 0);
+    const cameraUp = matrixColumn(viewRotation, 1);
+    const cameraForward = matrixColumn(viewRotation, 2);
+    const axes = [
+      { label: "X", color: "#ef4444", world: [1, 0, 0] },
+      { label: "Y", color: "#22c55e", world: [0, 1, 0] },
+      { label: "Z", color: "#3b82f6", world: [0, 0, 1] },
+    ].map((axis) => {
+      const rotatedWorld = multiplyMat3Vec3(frameRotation, axis.world);
+      const cameraX = dot(rotatedWorld, cameraRight);
+      const cameraY = dot(rotatedWorld, cameraUp);
+      const cameraZ = dot(rotatedWorld, cameraForward);
+      return {
+        ...axis,
+        endX: centerX + cameraX * axisLength,
+        endY: centerY + cameraY * axisLength,
+        depth: cameraZ,
+      };
+    });
+
+    axes.sort((first, second) => first.depth - second.depth);
+
+    axesContext.lineWidth = 2.5;
+    axesContext.font = "12px ui-monospace, SFMono-Regular, Menlo, monospace";
+    axesContext.textAlign = "center";
+    axesContext.textBaseline = "middle";
+
+    for (const axis of axes) {
+      axesContext.strokeStyle = axis.color;
+      axesContext.fillStyle = axis.color;
+      axesContext.globalAlpha = axis.depth >= 0 ? 1.0 : 0.45;
+
+      axesContext.beginPath();
+      axesContext.moveTo(centerX, centerY);
+      axesContext.lineTo(axis.endX, axis.endY);
+      axesContext.stroke();
+
+      axesContext.beginPath();
+      axesContext.arc(axis.endX, axis.endY, markerRadius, 0, Math.PI * 2);
+      axesContext.fill();
+
+      axesContext.fillText(
+        axis.label,
+        axis.endX + (axis.endX >= centerX ? 10 : -10),
+        axis.endY + (axis.endY >= centerY ? 10 : -10),
+      );
+    }
+
+    axesContext.globalAlpha = 1.0;
+  }
+
+  function drawHorizon() {
+    const shouldShowHorizon = Boolean(model.get("show_horizon"));
+    const shouldShowOrigin = Boolean(model.get("show_origin"));
+    guidesCanvas.hidden = !shouldShowHorizon && !shouldShowOrigin;
+    if (!shouldShowHorizon && !shouldShowOrigin) {
+      return;
+    }
+
+    const rect = root.getBoundingClientRect();
+    const width = Math.max(1, Math.round(rect.width || cameraState.width));
+    const height = Math.max(1, Math.round(rect.height || cameraState.height));
+    const dpr = window.devicePixelRatio || 1;
+    guidesCanvas.width = Math.round(width * dpr);
+    guidesCanvas.height = Math.round(height * dpr);
+    guidesCanvas.style.width = `${width}px`;
+    guidesCanvas.style.height = `${height}px`;
+    guidesContext.setTransform(dpr, 0, 0, dpr, 0, 0);
+    guidesContext.clearRect(0, 0, width, height);
+
+    const cameraRight = matrixColumn(cameraState.cam_to_world, 0);
+    const cameraUp = matrixColumn(cameraState.cam_to_world, 1);
+    const cameraForward = matrixColumn(cameraState.cam_to_world, 2);
+
+    if (shouldShowHorizon) {
+      const up = viewerUpVector();
+      const projectedUp = [
+        dot(up, cameraRight),
+        dot(up, cameraUp),
+        dot(up, cameraForward),
+      ];
+      const halfFovRadians = (cameraState.fov_degrees * Math.PI / 180.0) / 2.0;
+      const focal = (height / 2.0) / Math.tan(halfFovRadians);
+      const centerX = width / 2.0;
+      const centerY = height / 2.0;
+      const a = projectedUp[0] / focal;
+      const b = projectedUp[1] / focal;
+      const c = projectedUp[2] - centerX * a - centerY * b;
+
+      const points = [];
+      if (Math.abs(b) > 1e-6) {
+        points.push([0.0, (-c - a * 0.0) / b]);
+        points.push([width, (-c - a * width) / b]);
+      }
+      if (Math.abs(a) > 1e-6) {
+        points.push([(-c - b * 0.0) / a, 0.0]);
+        points.push([(-c - b * height) / a, height]);
+      }
+      const visiblePoints = points.filter(
+        ([x, y]) =>
+          Number.isFinite(x)
+          && Number.isFinite(y)
+          && x >= 0.0
+          && x <= width
+          && y >= 0.0
+          && y <= height,
+      );
+      if (visiblePoints.length >= 2) {
+        guidesContext.strokeStyle = "rgba(255,255,255,0.8)";
+        guidesContext.lineWidth = 2.0;
+        guidesContext.beginPath();
+        guidesContext.moveTo(visiblePoints[0][0], visiblePoints[0][1]);
+        guidesContext.lineTo(visiblePoints[1][0], visiblePoints[1][1]);
+        guidesContext.stroke();
+      }
+    }
+
+    if (shouldShowOrigin) {
+      const origin = [
+        Number(model.get("origin_x")) || 0.0,
+        Number(model.get("origin_y")) || 0.0,
+        Number(model.get("origin_z")) || 0.0,
+      ];
+      const cameraPosition = [
+        cameraState.cam_to_world[0][3],
+        cameraState.cam_to_world[1][3],
+        cameraState.cam_to_world[2][3],
+      ];
+      const relative = subtract(origin, cameraPosition);
+      const cameraX = dot(relative, cameraRight);
+      const cameraY = dot(relative, cameraUp);
+      const cameraZ = dot(relative, cameraForward);
+      if (cameraZ > 1e-5) {
+        const halfFovRadians = (cameraState.fov_degrees * Math.PI / 180.0) / 2.0;
+        const focal = (height / 2.0) / Math.tan(halfFovRadians);
+        const pixelX = (cameraX / cameraZ) * focal + width / 2.0;
+        const pixelY = (cameraY / cameraZ) * focal + height / 2.0;
+        const radius = 6.0;
+
+        guidesContext.strokeStyle = "rgba(255,191,36,0.95)";
+        guidesContext.lineWidth = 2.0;
+        guidesContext.beginPath();
+        guidesContext.moveTo(pixelX - radius, pixelY);
+        guidesContext.lineTo(pixelX + radius, pixelY);
+        guidesContext.moveTo(pixelX, pixelY - radius);
+        guidesContext.lineTo(pixelX, pixelY + radius);
+        guidesContext.stroke();
+      }
+    }
+  }
 
   function updateAspectRatio() {
     const explicitAspectRatio = Number(model.get("aspect_ratio"));
@@ -326,8 +597,8 @@ function render({ model, el }) {
     });
   }
 
-  function updateCameraMatrix() {
-    cameraState.cam_to_world = lookAtCamera(position, target, [0, 1, 0]);
+function updateCameraMatrix() {
+    setCameraRotation(rotationFromCamToWorld(cameraState.cam_to_world));
   }
 
   function syncSizeIntoCameraState() {
@@ -391,25 +662,23 @@ function render({ model, el }) {
     const rotationSpeed = 0.008;
     const offset = subtract(position, target);
     const radius = Math.max(1e-3, Math.hypot(...offset));
-    const yaw = Math.atan2(offset[0], offset[2]) - deltaX * rotationSpeed;
-    const pitch = clamp(
-      Math.atan2(offset[1], Math.hypot(offset[0], offset[2])) - deltaY * rotationSpeed,
-      -Math.PI / 2 + 1e-3,
-      Math.PI / 2 - 1e-3,
-    );
-    const cosPitch = Math.cos(pitch);
-    position = [
-      target[0] + radius * Math.sin(yaw) * cosPitch,
-      target[1] + radius * Math.sin(pitch),
-      target[2] + radius * Math.cos(yaw) * cosPitch,
-    ];
+    const upReference = viewerUpVector();
+    const yawAxis = upReference;
+    const yawRotation = axisAngleRotation(yawAxis, -deltaX * rotationSpeed);
+    const yawedOffset = multiplyMat3Vec3(yawRotation, offset);
+    const yawedForward = normalize(scale(yawedOffset, -1));
+    const pitchAxis = normalize(cross(yawedForward, upReference));
+    const pitchRotation = axisAngleRotation(pitchAxis, -deltaY * rotationSpeed);
+    const orbitedOffset = multiplyMat3Vec3(pitchRotation, yawedOffset);
+    position = add(target, orbitedOffset);
+    cameraState.cam_to_world = lookAtCamera(position, target, upReference);
     orbitDistance = radius;
   }
 
   function pan(deltaX, deltaY) {
-    const forward = normalize(subtract(target, position));
-    const right = normalize(cross(forward, [0, 1, 0]));
-    const up = normalize(cross(right, forward));
+    const rotation = rotationFromCamToWorld(cameraState.cam_to_world);
+    const right = normalize(matrixColumn(rotation, 0));
+    const up = normalize(matrixColumn(rotation, 1));
     const scaleFactor =
       Math.max(1e-3, orbitDistance) *
       Math.tan((cameraState.fov_degrees * Math.PI / 180.0) / 2.0) /
@@ -417,7 +686,7 @@ function render({ model, el }) {
       2.0;
     const translation = add(
       scale(right, -deltaX * scaleFactor),
-      scale(up, deltaY * scaleFactor),
+      scale(up, -deltaY * scaleFactor),
     );
     position = add(position, translation);
     target = add(target, translation);
@@ -435,9 +704,10 @@ function render({ model, el }) {
     if (pressedKeys.size === 0) {
       return;
     }
-    const forward = normalize(subtract(target, position));
-    const right = normalize(cross(forward, [0, 1, 0]));
-    const up = [0, 1, 0];
+    const rotation = rotationFromCamToWorld(cameraState.cam_to_world);
+    const forward = normalize(matrixColumn(rotation, 2));
+    const right = normalize(matrixColumn(rotation, 0));
+    const up = normalize(matrixColumn(rotation, 1));
     const speed = Math.max(0.05, orbitDistance * 0.8) * deltaSeconds;
     let motion = [0, 0, 0];
     if (pressedKeys.has("w")) motion = add(motion, scale(forward, speed));
@@ -540,6 +810,8 @@ function render({ model, el }) {
     frame.height = height;
     frameContext.clearRect(0, 0, width, height);
     frameContext.drawImage(bitmap, 0, 0, width, height);
+    drawAxesGizmo();
+    drawHorizon();
     bitmap.close();
     lastFrameRevision = revision;
     const nowMs = performance.now();
@@ -764,6 +1036,8 @@ function render({ model, el }) {
     updateAspectRatio();
     const forward = matrixColumn(cameraState.cam_to_world, 2);
     target = add(position, scale(forward, orbitDistance));
+    drawAxesGizmo();
+    drawHorizon();
   }
 
   frame.addEventListener("contextmenu", (event) => {
@@ -914,6 +1188,22 @@ function render({ model, el }) {
     renderFps = Number(model.get("render_fps")) || null;
     updateLatencyBadge();
   };
+  const onShowAxesChange = () => {
+    drawAxesGizmo();
+  };
+  const onShowHorizonChange = () => {
+    drawHorizon();
+  };
+  const onShowOriginChange = () => {
+    drawHorizon();
+  };
+  const onViewerRotationChange = () => {
+    drawAxesGizmo();
+    drawHorizon();
+  };
+  const onOriginChange = () => {
+    drawHorizon();
+  };
 
   model.on("change:camera_state_json", onCameraChange);
   model.on("change:aspect_ratio", onAspectRatioChange);
@@ -922,9 +1212,20 @@ function render({ model, el }) {
   model.on("change:stream_path", onStreamConfigChange);
   model.on("change:stream_token", onStreamConfigChange);
   model.on("change:render_fps", onRenderFpsChange);
+  model.on("change:show_axes", onShowAxesChange);
+  model.on("change:show_horizon", onShowHorizonChange);
+  model.on("change:show_origin", onShowOriginChange);
+  model.on("change:viewer_rotation_x_degrees", onViewerRotationChange);
+  model.on("change:viewer_rotation_y_degrees", onViewerRotationChange);
+  model.on("change:viewer_rotation_z_degrees", onViewerRotationChange);
+  model.on("change:origin_x", onOriginChange);
+  model.on("change:origin_y", onOriginChange);
+  model.on("change:origin_z", onOriginChange);
 
   updateAspectRatio();
   updateLatencyBadge();
+  drawAxesGizmo();
+  drawHorizon();
   connectFrameStream();
   pushCameraState();
 
@@ -942,6 +1243,15 @@ function render({ model, el }) {
     model.off("change:stream_path", onStreamConfigChange);
     model.off("change:stream_token", onStreamConfigChange);
     model.off("change:render_fps", onRenderFpsChange);
+    model.off("change:show_axes", onShowAxesChange);
+    model.off("change:show_horizon", onShowHorizonChange);
+    model.off("change:show_origin", onShowOriginChange);
+    model.off("change:viewer_rotation_x_degrees", onViewerRotationChange);
+    model.off("change:viewer_rotation_y_degrees", onViewerRotationChange);
+    model.off("change:viewer_rotation_z_degrees", onViewerRotationChange);
+    model.off("change:origin_x", onOriginChange);
+    model.off("change:origin_y", onOriginChange);
+    model.off("change:origin_z", onOriginChange);
     if (settleTimeoutId !== null) {
       clearTimeout(settleTimeoutId);
     }

@@ -309,7 +309,7 @@ def _look_at_cam_to_world(
         fallback_up = np.array([0.0, 0.0, 1.0], dtype=np.float64)
         right = np.cross(forward, fallback_up)
     right = _normalize(right)
-    up = _normalize(np.cross(right, forward))
+    up = _normalize(np.cross(forward, right))
 
     cam_to_world = np.eye(4, dtype=np.float64)
     cam_to_world[:3, 0] = right
@@ -317,6 +317,16 @@ def _look_at_cam_to_world(
     cam_to_world[:3, 2] = forward
     cam_to_world[:3, 3] = position
     return cam_to_world
+
+
+def _roll_cam_to_world_180(
+    cam_to_world: Float[np.ndarray, "4 4"],
+) -> Float[np.ndarray, "4 4"]:
+    """Apply a 180-degree roll around the camera forward axis."""
+    rolled = np.asarray(cam_to_world, dtype=np.float64).copy()
+    roll = np.diag([-1.0, -1.0, 1.0, 1.0])
+    rolled[:3, :3] = rolled[:3, :3] @ roll[:3, :3]
+    return rolled
 
 
 def _convention_transform_matrix(
@@ -406,7 +416,9 @@ class CameraState:
             fov_degrees=fov_degrees,
             width=width,
             height=height,
-            cam_to_world=_look_at_cam_to_world(position, look_at, up_direction),
+            cam_to_world=_roll_cam_to_world_180(
+                _look_at_cam_to_world(position, look_at, up_direction)
+            ),
             camera_convention=camera_convention,
         )
 
@@ -433,6 +445,24 @@ class CameraState:
             height=height,
             cam_to_world=self.cam_to_world,
             camera_convention=self.camera_convention,
+        )
+
+    def with_convention(
+        self, camera_convention: CameraConvention
+    ) -> CameraState:
+        """Return a copy converted into a different camera convention."""
+        if camera_convention == self.camera_convention:
+            return self
+        return CameraState(
+            fov_degrees=self.fov_degrees,
+            width=self.width,
+            height=self.height,
+            cam_to_world=_convert_cam_to_world_between_conventions(
+                self.cam_to_world,
+                source_convention=self.camera_convention,
+                target_convention=camera_convention,
+            ),
+            camera_convention=camera_convention,
         )
 
     def to_json(self) -> str:
@@ -520,15 +550,90 @@ class NativeViewerState:
     """
 
     camera_state: CameraState
+    initial_camera_state: CameraState
     last_click: ViewerClick | None = None
+    show_axes: bool = True
+    show_horizon: bool = False
+    show_origin: bool = False
+    viewer_rotation_x_degrees: float = 0.0
+    viewer_rotation_y_degrees: float = 0.0
+    viewer_rotation_z_degrees: float = 0.0
+    origin: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    _reset_camera_callback: Callable[[CameraState], None] | None = None
+    _viewer_rotation_callback: Callable[[float, float, float], None] | None = (
+        None
+    )
+    _show_horizon_callback: Callable[[bool], None] | None = None
+    _show_origin_callback: Callable[[bool], None] | None = None
+    _origin_callback: Callable[[float, float, float], None] | None = None
 
     def __init__(
         self,
         camera_state: CameraState | None = None,
         last_click: ViewerClick | None = None,
+        show_axes: bool = True,
+        show_horizon: bool = False,
+        show_origin: bool = False,
     ) -> None:
-        self.camera_state = camera_state or CameraState.default()
+        resolved_camera_state = camera_state or CameraState.default()
+        self.camera_state = resolved_camera_state
+        self.initial_camera_state = resolved_camera_state
         self.last_click = last_click
+        self.show_axes = show_axes
+        self.show_horizon = show_horizon
+        self.show_origin = show_origin
+        self.viewer_rotation_x_degrees = 0.0
+        self.viewer_rotation_y_degrees = 0.0
+        self.viewer_rotation_z_degrees = 0.0
+        self.origin = (0.0, 0.0, 0.0)
+        self._reset_camera_callback = None
+        self._viewer_rotation_callback = None
+        self._show_horizon_callback = None
+        self._show_origin_callback = None
+        self._origin_callback = None
+
+    def reset_camera(self) -> None:
+        """Reset the current camera state back to the initial camera state."""
+        self.camera_state = self.initial_camera_state
+        if self._reset_camera_callback is not None:
+            self._reset_camera_callback(self.camera_state)
+
+    def set_camera(self, camera_state: CameraState) -> None:
+        """Set the current camera state and push it into the live viewer."""
+        self.camera_state = camera_state
+        if self._reset_camera_callback is not None:
+            self._reset_camera_callback(self.camera_state)
+
+    def set_viewer_rotation(
+        self,
+        x_degrees: float,
+        y_degrees: float,
+        z_degrees: float,
+    ) -> None:
+        """Set the persistent viewer-frame rotation used by controls/overlays."""
+        self.viewer_rotation_x_degrees = x_degrees
+        self.viewer_rotation_y_degrees = y_degrees
+        self.viewer_rotation_z_degrees = z_degrees
+        if self._viewer_rotation_callback is not None:
+            self._viewer_rotation_callback(x_degrees, y_degrees, z_degrees)
+
+    def set_show_horizon(self, show_horizon: bool) -> None:
+        """Set the horizon overlay visibility and push it into the live viewer."""
+        self.show_horizon = show_horizon
+        if self._show_horizon_callback is not None:
+            self._show_horizon_callback(show_horizon)
+
+    def set_show_origin(self, show_origin: bool) -> None:
+        """Set the origin marker visibility and push it into the live viewer."""
+        self.show_origin = show_origin
+        if self._show_origin_callback is not None:
+            self._show_origin_callback(show_origin)
+
+    def set_origin(self, x: float, y: float, z: float) -> None:
+        """Set the world-space origin marker position in the live viewer."""
+        self.origin = (x, y, z)
+        if self._origin_callback is not None:
+            self._origin_callback(x, y, z)
 
 
 def _normalize_frame(
@@ -697,7 +802,7 @@ class _LatestOnlyRenderer:
         publish_frame: Callable[
             [int, CameraState, np.ndarray, float, bool], None
         ],
-        publish_error: Callable[[int, str], None],
+        publish_error: Callable[[int, Exception, str], None],
         set_rendering: Callable[[bool], None],
     ) -> None:
         self._render_fn = render_fn
@@ -759,7 +864,7 @@ class _LatestOnlyRenderer:
                 with self._condition:
                     is_latest = revision == self._latest_revision
                 if is_latest:
-                    self._publish_error(revision, message)
+                    self._publish_error(revision, exception, message)
                     self._set_rendering(False)
                 continue
 
@@ -789,7 +894,7 @@ class _LatestOnlyRenderer:
                         exception.__traceback__,
                     )
                 ).rstrip()
-                self._publish_error(revision, message)
+                self._publish_error(revision, exception, message)
             finally:
                 self._set_rendering(False)
 
@@ -825,6 +930,15 @@ class _NativeViewerAnyWidget(anywidget.AnyWidget):
     last_click_json = traitlets.Unicode("").tag(sync=True)
     is_rendering = traitlets.Bool(False).tag(sync=True)
     error_text = traitlets.Unicode("").tag(sync=True)
+    show_axes = traitlets.Bool(False).tag(sync=True)
+    show_horizon = traitlets.Bool(False).tag(sync=True)
+    show_origin = traitlets.Bool(False).tag(sync=True)
+    viewer_rotation_x_degrees = traitlets.Float(0.0).tag(sync=True)
+    viewer_rotation_y_degrees = traitlets.Float(0.0).tag(sync=True)
+    viewer_rotation_z_degrees = traitlets.Float(0.0).tag(sync=True)
+    origin_x = traitlets.Float(0.0).tag(sync=True)
+    origin_y = traitlets.Float(0.0).tag(sync=True)
+    origin_z = traitlets.Float(0.0).tag(sync=True)
     controls_hint = traitlets.Unicode(
         "Orbit: drag | Pan: right-drag | Move: WASDQE | Zoom: wheel"
     ).tag(sync=True)
@@ -836,6 +950,15 @@ class _NativeViewerAnyWidget(anywidget.AnyWidget):
         *,
         camera_state: CameraState,
         aspect_ratio: float,
+        show_axes: bool,
+        show_horizon: bool,
+        show_origin: bool,
+        viewer_rotation_x_degrees: float,
+        viewer_rotation_y_degrees: float,
+        viewer_rotation_z_degrees: float,
+        origin_x: float,
+        origin_y: float,
+        origin_z: float,
         stream_port: int,
         stream_path: str,
         stream_token: str,
@@ -843,6 +966,15 @@ class _NativeViewerAnyWidget(anywidget.AnyWidget):
         super().__init__(
             camera_state_json=camera_state.to_json(),
             aspect_ratio=aspect_ratio,
+            show_axes=show_axes,
+            show_horizon=show_horizon,
+            show_origin=show_origin,
+            viewer_rotation_x_degrees=viewer_rotation_x_degrees,
+            viewer_rotation_y_degrees=viewer_rotation_y_degrees,
+            viewer_rotation_z_degrees=viewer_rotation_z_degrees,
+            origin_x=origin_x,
+            origin_y=origin_y,
+            origin_z=origin_z,
             stream_port=stream_port,
             stream_path=stream_path,
             stream_token=stream_token,
@@ -860,18 +992,22 @@ class NativeViewerWidget(_StableMarimoAnyWidget):
         settled_quality: Literal["jpeg_95", "jpeg_100", "png"],
         interactive_scale: float | None,
         state: NativeViewerState | None,
+        raise_on_error: bool,
     ) -> None:
         super().__init__(anywidget_instance)
         self._latest_frame_array: np.ndarray | None = None
         self._interactive_quality = interactive_quality
         self._settled_quality = settled_quality
         self._interactive_scale = interactive_scale
+        self._raise_on_error = raise_on_error
         self._state = state
         self._stream_server = _get_frame_stream_server()
         self._stream_path = anywidget_instance.stream_path
         self._last_debug_sample_at: float | None = None
         self._smoothed_debug_metrics: dict[str, float] = {}
         self._render_frame_timestamps: list[float] = []
+        self._render_completion_condition = threading.Condition()
+        self._completed_revisions: dict[int, Exception | None] = {}
         try:
             self._main_loop: asyncio.AbstractEventLoop | None = (
                 asyncio.get_running_loop()
@@ -893,6 +1029,17 @@ class NativeViewerWidget(_StableMarimoAnyWidget):
         self.widget.observe(
             self._on_last_click_json_change, names=["last_click_json"]
         )
+        self.widget.observe(self._on_show_axes_change, names=["show_axes"])
+        self.widget.observe(
+            self._on_show_horizon_change, names=["show_horizon"]
+        )
+        self.widget.observe(self._on_show_origin_change, names=["show_origin"])
+        if self._state is not None:
+            self._state._reset_camera_callback = self.set_camera_state
+            self._state._viewer_rotation_callback = self.set_viewer_rotation
+            self._state._show_horizon_callback = self.set_show_horizon
+            self._state._show_origin_callback = self.set_show_origin
+            self._state._origin_callback = self.set_origin
         self.rerender()
 
     def _update_smoothed_debug_metrics(
@@ -1045,11 +1192,68 @@ class NativeViewerWidget(_StableMarimoAnyWidget):
             None if not new_value else ViewerClick.from_json(new_value)
         )
 
+    def _on_show_axes_change(self, change: dict[str, object]) -> None:
+        """Persist the axis-gizmo visibility into the shared state object."""
+        new_value = change.get("new")
+        if not isinstance(new_value, bool) or self._state is None:
+            return
+        self._state.show_axes = new_value
+
+    def _on_show_horizon_change(self, change: dict[str, object]) -> None:
+        """Persist the horizon visibility into the shared state object."""
+        new_value = change.get("new")
+        if not isinstance(new_value, bool) or self._state is None:
+            return
+        self._state.show_horizon = new_value
+
+    def _on_show_origin_change(self, change: dict[str, object]) -> None:
+        """Persist the origin visibility into the shared state object."""
+        new_value = change.get("new")
+        if not isinstance(new_value, bool) or self._state is None:
+            return
+        self._state.show_origin = new_value
+
     def set_camera_state(self, camera_state: CameraState) -> None:
         """Apply a camera state and request a fresh render."""
         self.widget.camera_state_json = camera_state.to_json()
         self.widget.error_text = ""
         self.widget._camera_revision += 1
+        self._wait_for_revision(self.widget._camera_revision)
+
+    def set_viewer_rotation(
+        self,
+        x_degrees: float,
+        y_degrees: float,
+        z_degrees: float,
+    ) -> None:
+        """Update the viewer-frame rotation used by controls and overlays."""
+        self.widget.viewer_rotation_x_degrees = x_degrees
+        self.widget.viewer_rotation_y_degrees = y_degrees
+        self.widget.viewer_rotation_z_degrees = z_degrees
+        self.widget.send_state(
+            [
+                "viewer_rotation_x_degrees",
+                "viewer_rotation_y_degrees",
+                "viewer_rotation_z_degrees",
+            ]
+        )
+
+    def set_show_horizon(self, show_horizon: bool) -> None:
+        """Update horizon visibility in the live viewer."""
+        self.widget.show_horizon = show_horizon
+        self.widget.send_state("show_horizon")
+
+    def set_show_origin(self, show_origin: bool) -> None:
+        """Update origin visibility in the live viewer."""
+        self.widget.show_origin = show_origin
+        self.widget.send_state("show_origin")
+
+    def set_origin(self, x: float, y: float, z: float) -> None:
+        """Update the origin marker position in the live viewer."""
+        self.widget.origin_x = x
+        self.widget.origin_y = y
+        self.widget.origin_z = z
+        self.widget.send_state(["origin_x", "origin_y", "origin_z"])
 
     def rerender(self, *, interactive: bool = False) -> None:
         """Request a fresh render without changing the camera pose.
@@ -1061,6 +1265,7 @@ class NativeViewerWidget(_StableMarimoAnyWidget):
         if interactive:
             self.widget.interaction_active = True
         self.widget._camera_revision += 1
+        self._wait_for_revision(self.widget._camera_revision)
 
     def _interactive_camera_state(
         self, camera_state: CameraState
@@ -1091,6 +1296,25 @@ class NativeViewerWidget(_StableMarimoAnyWidget):
             camera_state,
             self.widget.interaction_active,
         )
+
+    def _complete_revision(
+        self, revision: int, error: Exception | None = None
+    ) -> None:
+        """Record the completion state for a render revision."""
+        with self._render_completion_condition:
+            self._completed_revisions[revision] = error
+            self._render_completion_condition.notify_all()
+
+    def _wait_for_revision(self, revision: int) -> None:
+        """Block until the requested revision completes and re-raise errors."""
+        if not self._raise_on_error:
+            return
+        with self._render_completion_condition:
+            while revision not in self._completed_revisions:
+                self._render_completion_condition.wait()
+            error = self._completed_revisions.pop(revision)
+        if error is not None:
+            raise error
 
     def _publish_frame(
         self,
@@ -1244,15 +1468,17 @@ class NativeViewerWidget(_StableMarimoAnyWidget):
                 self.widget.send_state("camera_state_json")
 
         self._run_on_main_loop(_apply_trait_updates)
+        self._complete_revision(revision)
 
-    def _publish_error(self, revision: int, message: str) -> None:
-        del revision
-
+    def _publish_error(
+        self, revision: int, error: Exception, message: str
+    ) -> None:
         def _apply_error_update() -> None:
             self.widget.error_text = message
             self.widget.send_state("error_text")
 
         self._run_on_main_loop(_apply_error_update)
+        self._complete_revision(revision, error)
 
     def _set_rendering(self, value: bool) -> None:
         def _apply_rendering_update() -> None:
@@ -1269,21 +1495,28 @@ def native_viewer(
     interactive_quality: int = 50,
     settled_quality: Literal["jpeg_95", "jpeg_100", "png"] = "jpeg_100",
     interactive_scale: float | None = None,
+    camera_convention: CameraConvention = "opencv",
     initial_view: CameraState | None = None,
     state: NativeViewerState | None = None,
+    raise_on_error: bool = True,
 ) -> NativeViewerWidget:
     """Create a native image-based 3D viewer for marimo notebooks.
 
     The render size comes from the measured notebook layout. `aspect_ratio`
     controls the initial widget height before the first render and resize
     measurement. `initial_view` sets the initial camera pose, FOV, convention,
-    and nominal viewport size before the widget measures the live layout. Reuse
-    the same `state` object across reruns to persist the camera state and last
-    click even when `render_fn` is recreated. `interactive_scale` optionally
-    downsamples motion renders while keeping settled renders at full resolution;
-    `None` and `1.0` both disable motion downscaling. Interactive render rate
-    is limited by the browser's pointer event frequency (typically 20-60 fps);
-    use `rerender(interactive=True)` to drive rendering from Python instead.
+    and nominal viewport size before the widget measures the live layout.
+    `camera_convention` controls the default convention when no explicit camera
+    state is provided via `initial_view` or `state`. Axis-gizmo visibility is
+    stored in `NativeViewerState.show_axes`. Reuse the same `state` object
+    across reruns to persist the camera state and last click even when
+    `render_fn` is recreated. `interactive_scale` optionally downsamples motion
+    renders while keeping settled renders at full resolution; `None` and `1.0`
+    both disable motion downscaling. Interactive render rate is limited by the
+    browser's pointer event frequency (typically 20-60 fps); use
+    `rerender(interactive=True)` to drive rendering from Python instead. When
+    `raise_on_error` is `True`, Python-triggered renders re-raise render
+    exceptions instead of only surfacing them in widget state.
 
     The returned widget exposes:
 
@@ -1311,13 +1544,32 @@ def native_viewer(
     resolved_camera_state = (
         state.camera_state
         if state is not None
-        else initial_view or CameraState.default()
+        else initial_view
+        or CameraState.default(camera_convention=camera_convention)
     )
+    resolved_show_axes = state.show_axes if state is not None else False
+    resolved_show_horizon = state.show_horizon if state is not None else False
+    resolved_show_origin = state.show_origin if state is not None else False
     stream_server = _get_frame_stream_server()
     stream_id, stream_token = stream_server.register_stream()
     anywidget_instance = _NativeViewerAnyWidget(
         camera_state=resolved_camera_state,
         aspect_ratio=aspect_ratio,
+        show_axes=resolved_show_axes,
+        show_horizon=resolved_show_horizon,
+        show_origin=resolved_show_origin,
+        viewer_rotation_x_degrees=(
+            state.viewer_rotation_x_degrees if state is not None else 0.0
+        ),
+        viewer_rotation_y_degrees=(
+            state.viewer_rotation_y_degrees if state is not None else 0.0
+        ),
+        viewer_rotation_z_degrees=(
+            state.viewer_rotation_z_degrees if state is not None else 0.0
+        ),
+        origin_x=(state.origin[0] if state is not None else 0.0),
+        origin_y=(state.origin[1] if state is not None else 0.0),
+        origin_z=(state.origin[2] if state is not None else 0.0),
         stream_port=stream_server.port,
         stream_path=f"/streams/{stream_id}",
         stream_token=stream_token,
@@ -1331,4 +1583,5 @@ def native_viewer(
         settled_quality=settled_quality,
         interactive_scale=interactive_scale,
         state=state,
+        raise_on_error=raise_on_error,
     )

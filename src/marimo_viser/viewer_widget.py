@@ -1544,7 +1544,7 @@ def native_viewer(
     aspect_ratio: float = 16.3 / 9.0,
     interactive_quality: int = 50,
     settled_quality: Literal["jpeg_95", "jpeg_100", "png"] = "jpeg_100",
-    interactive_max_side: int | None = 1024,
+    interactive_max_side: int | None = 1980,
     camera_convention: CameraConvention = "opencv",
     initial_view: CameraState | None = None,
     state: NativeViewerState | None = None,

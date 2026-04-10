@@ -47,7 +47,7 @@ def _(viewer_render_fn, viewer_state):
     viewer = native_viewer(
         viewer_render_fn,
         interactive_quality=50,
-        interactive_max_side=1024,
+        interactive_max_side=1980,
         state=viewer_state,
         # settled_quality='png'
     )

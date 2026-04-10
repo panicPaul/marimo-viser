@@ -81,11 +81,11 @@ def _():
 
 @app.cell
 def _(viewer_state):
-    _ = (
+    (
         viewer_state.set_show_origin(False)
-        .set_show_stats(False)
+        .set_show_stats(True)
         .set_show_horizon(False)
-        .set_show_axes(False)
+        .set_show_axes(True)
     )
     return
 

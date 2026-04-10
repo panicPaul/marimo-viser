@@ -1256,7 +1256,7 @@ wheels = [
 ]
 
 [[package]]
-name = "marimo-viser"
+name = "marimo-3dv"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
@@ -1273,6 +1273,7 @@ dependencies = [
     { name = "pre-commit" },
     { name = "py-jaxtyping" },
     { name = "pydantic" },
+    { name = "pyglet" },
     { name = "pytest" },
     { name = "ruff" },
     { name = "splines" },
@@ -1298,6 +1299,7 @@ requires-dist = [
     { name = "pre-commit", specifier = ">=4.5.1" },
     { name = "py-jaxtyping", specifier = ">=0.1.5" },
     { name = "pydantic", specifier = ">=2.12.5" },
+    { name = "pyglet", specifier = ">=2.0.0" },
     { name = "pytest", specifier = ">=9.0.2" },
     { name = "ruff", specifier = ">=0.15.9" },
     { name = "splines", specifier = ">=0.3.3" },
@@ -2234,6 +2236,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/fe/9a/e6bca0eed82db26562c73b5076539a4a08d3cffd19c3cc5913a3e61145fd/pydub-0.25.1.tar.gz", hash = "sha256:980a33ce9949cab2a569606b65674d748ecbca4f0796887fd6f46173a7b0d30f", size = 38326, upload-time = "2021-03-10T02:09:54.659Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/a6/53/d78dc063216e62fc55f6b2eebb447f6a4b0a59f55c8406376f76bf959b08/pydub-0.25.1-py2.py3-none-any.whl", hash = "sha256:65617e33033874b59d87db603aa1ed450633288aefead953b30bded59cb599a6", size = 32327, upload-time = "2021-03-10T02:09:53.503Z" },
+]
+
+[[package]]
+name = "pyglet"
+version = "2.1.14"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/e8/a6/ffd78b2d05a820ced85baa11210b8e5d0db0d951767021150be0a231df00/pyglet-2.1.14.tar.gz", hash = "sha256:feb3fba05a85f50f793688d88ddfbcdc57044d971f2d8d2107eb7578eb4af51e", size = 6595146, upload-time = "2026-04-05T08:24:35.549Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ae/d4/789d34a4674a4ccc0b65ad54d0f963f873d39000c3ebed0880574d5437e5/pyglet-2.1.14-py3-none-any.whl", hash = "sha256:70febf03f206607103e1f9806527019c589002626937aecdca4d095ce0a4b9b0", size = 1032928, upload-time = "2026-04-05T08:24:29.068Z" },
 ]
 
 [[package]]

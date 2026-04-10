@@ -3,7 +3,7 @@
 # dependencies = [
 #     "marimo>=0.23.0",
 #     "numpy==2.4.4",
-#     "marimo-viser",
+#     "marimo-3dv",
 #     "gsplat==1.5.3",
 #     "jaxtyping==0.3.9",
 #     "torch==2.11.0",
@@ -12,10 +12,10 @@
 # ]
 #
 # [tool.uv.sources]
-# marimo-viser = { path = "..", editable = true }
+# marimo-3dv = { path = "..", editable = true }
 # ///
 
-"""Interactive 3D Gaussian splatting viewer using gsplat and marimo-viser."""
+"""Interactive 3D Gaussian splatting viewer using gsplat and marimo-3dv."""
 
 import marimo
 
@@ -24,7 +24,6 @@ app = marimo.App(width="medium")
 
 with app.setup:
     from dataclasses import dataclass
-    from functools import partial
     from math import isqrt
     from pathlib import Path
 
@@ -37,11 +36,17 @@ with app.setup:
     from pydantic import BaseModel, Field
     from torch import Tensor
 
-    from marimo_viser import (
+    from marimo_3dv import (
         CameraState,
+        GuiPipeline,
         NativeViewerState,
+        RenderResult,
+        filter_opacity_op,
+        filter_size_op,
         form_gui,
+        max_sh_degree_op,
         native_viewer,
+        show_distribution_op,
     )
 
 
@@ -68,12 +73,6 @@ def _(load_form):
 
 
 @app.cell
-def _(rotation_form):
-    rotation_form
-    return
-
-
-@app.cell
 def _():
     viewer_state = NativeViewerState()
     return (viewer_state,)
@@ -91,15 +90,57 @@ def _(viewer_state):
 
 
 @app.cell
-def _(scene, viewer_state):
-    viewer = native_viewer(
-        partial(rasterize_scene, scene=scene),
-        state=viewer_state,
-        camera_convention="opencv",
-        interactive_quality=50,
-        interactive_max_side=1980,
+def _():
+    gui_pipeline = (
+        GuiPipeline()
+        .pipe(max_sh_degree_op())
+        .pipe(filter_opacity_op())
+        .pipe(filter_size_op())
+        .pipe(show_distribution_op())
     )
-    return (viewer,)
+    return (gui_pipeline,)
+
+
+@app.cell
+def _(gui_pipeline, scene, viewer_state):
+    pipeline_result = gui_pipeline.build(scene, viewer_state)
+    return (pipeline_result,)
+
+
+@app.cell
+def _(pipeline_result):
+    pipeline_config_gui = form_gui(
+        pipeline_result.config_model,
+        value=pipeline_result.default_config,
+        live_update=True,
+    )
+    pipeline_config_gui
+    return (pipeline_config_gui,)
+
+
+@app.cell
+def _(pipeline_config_gui, pipeline_result, viewer_state):
+    from marimo_3dv import desktop_viewer
+
+    render_fn = pipeline_result.bind(
+        pipeline_config_gui.value or pipeline_result.default_config,
+        backend_fn=rasterize_scene,
+    )
+    if mo.running_in_notebook():
+        viewer = native_viewer(
+            lambda cam: render_fn(cam).image,
+            state=viewer_state,
+            camera_convention="opencv",
+            interactive_quality=50,
+            interactive_max_side=1980,
+        )
+    else:
+        viewer = desktop_viewer(
+            lambda cam: render_fn(cam).image,
+            state=viewer_state,
+        )
+        viewer.run()
+    return render_fn, viewer
 
 
 @app.cell
@@ -123,22 +164,16 @@ def _():
 
 
 @app.cell
-def _(scene, viewer):
+def _(render_fn, scene, viewer):
     debug_comparison = None
     if scene is not None:
         try:
             camera_state = viewer.get_camera_state()
-            direct_image = rasterize_scene(camera_state, scene)
+            pipeline_image = render_fn(camera_state).image
             snapshot_image = np.asarray(viewer.get_snapshot())
             debug_comparison = {
-                "same_shape": direct_image.shape == snapshot_image.shape,
-                "identical": np.array_equal(direct_image, snapshot_image),
-                "matches_left_right_flip": np.array_equal(
-                    direct_image[:, ::-1, :], snapshot_image
-                ),
-                "matches_up_down_flip": np.array_equal(
-                    direct_image[::-1, :, :], snapshot_image
-                ),
+                "same_shape": pipeline_image.shape == snapshot_image.shape,
+                "identical": np.array_equal(pipeline_image, snapshot_image),
             }
         except RuntimeError as error:
             debug_comparison = {"snapshot_error": str(error)}
@@ -178,10 +213,12 @@ def _():
 @app.function
 def rasterize_scene(
     camera: CameraState, scene: SplatScene | None
-) -> Float[np.ndarray, "height width 3"]:
+) -> RenderResult:
     """Render a SplatScene from the given camera using gsplat rasterization."""
     if scene is None:
-        return np.full((camera.height, camera.width, 3), 245, dtype=np.uint8)
+        return RenderResult(
+            image=np.full((camera.height, camera.width, 3), 245, dtype=np.uint8)
+        )
 
     gsplat_camera = camera.with_convention("opencv")
     device = scene.center_positions.device
@@ -202,7 +239,7 @@ def rasterize_scene(
         dtype=torch.float32,
     )[None]
 
-    render_colors, _render_alphas, _meta = rasterization(
+    render_colors, _render_alphas, meta = rasterization(
         means=scene.center_positions,
         quats=scene.quaternion_orientation,
         scales=torch.exp(scene.log_half_extents),
@@ -213,55 +250,20 @@ def rasterize_scene(
         width=gsplat_camera.width,
         height=gsplat_camera.height,
         sh_degree=scene.sh_degree,
-        # backgrounds=torch.ones(3, device=device, dtype=torch.float32),
     )
     image = render_colors[0].clamp(0.0, 1.0).cpu().numpy()
-    return (image * 255).astype(np.uint8)
+    image_uint8 = (image * 255).astype(np.uint8)
 
+    metadata: dict = {}
+    if "means2d" in meta:
+        metadata["projected_means"] = meta["means2d"][0]
 
-@app.function
-def rotation_matrix_xyz(
-    x_degrees: float,
-    y_degrees: float,
-    z_degrees: float,
-) -> Float[np.ndarray, "3 3"]:
-    """Build a 3D rotation matrix from Euler angles in degrees."""
-    x_radians, y_radians, z_radians = np.radians(
-        [x_degrees, y_degrees, z_degrees]
-    )
-    cos_x, cos_y, cos_z = np.cos([x_radians, y_radians, z_radians])
-    sin_x, sin_y, sin_z = np.sin([x_radians, y_radians, z_radians])
-
-    rotation_x = np.array(
-        [
-            [1.0, 0.0, 0.0],
-            [0.0, cos_x, -sin_x],
-            [0.0, sin_x, cos_x],
-        ],
-        dtype=np.float64,
-    )
-    rotation_y = np.array(
-        [
-            [cos_y, 0.0, sin_y],
-            [0.0, 1.0, 0.0],
-            [-sin_y, 0.0, cos_y],
-        ],
-        dtype=np.float64,
-    )
-    rotation_z = np.array(
-        [
-            [cos_z, -sin_z, 0.0],
-            [sin_z, cos_z, 0.0],
-            [0.0, 0.0, 1.0],
-        ],
-        dtype=np.float64,
-    )
-    return rotation_z @ rotation_y @ rotation_x
+    return RenderResult(image=image_uint8, metadata=metadata)
 
 
 @app.cell(hide_code=True)
 def _():
-    mo.md(r"""
+    mo.md("""
     ## GUI Definition
     """)
     return
@@ -285,67 +287,29 @@ def _():
 
 @app.cell
 def _(load_form):
-    load_config = load_form.value
-    if load_config is not None:
+    if mo.running_in_notebook():
+        load_config = load_form.value
         scene = (
             load_splat_scene(load_config.ply_path)
-            if load_config.ply_path.exists()
+            if load_config is not None and load_config.ply_path.exists()
             else None
         )
     else:
-        scene = None
+        import subprocess
+
+        result = subprocess.run(
+            [
+                "zenity",
+                "--file-selection",
+                "--title=Open PLY file",
+                "--file-filter=*.ply",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        ply_path = Path(result.stdout.strip())
+        scene = load_splat_scene(ply_path) if ply_path.exists() else None
     return (scene,)
-
-
-@app.cell(hide_code=True)
-def _():
-    mo.md("""
-    ## Viewer Rotation
-    """)
-    return
-
-
-@app.cell
-def _():
-    class RotationConfig(BaseModel):
-        """Live camera-local rotation controls for the viewer."""
-
-        rotation_x_degrees: float = Field(
-            default=0.0,
-            ge=-180.0,
-            le=180.0,
-            description="Camera-local rotation around the X axis in degrees.",
-        )
-        rotation_y_degrees: float = Field(
-            default=0.0,
-            ge=-180.0,
-            le=180.0,
-            description="Camera-local rotation around the Y axis in degrees.",
-        )
-        rotation_z_degrees: float = Field(
-            default=0.0,
-            ge=-180.0,
-            le=180.0,
-            description="Camera-local rotation around the Z axis in degrees.",
-        )
-
-    rotation_form = form_gui(
-        RotationConfig,
-        value=RotationConfig(),
-        live_update=True,
-    )
-    return (rotation_form,)
-
-
-@app.cell
-def _(rotation_form, viewer_state):
-    rotation_config = rotation_form.value
-    viewer_state.set_viewer_rotation(
-        rotation_config.rotation_x_degrees,
-        rotation_config.rotation_y_degrees,
-        rotation_config.rotation_z_degrees,
-    )
-    return
 
 
 @app.cell(hide_code=True)

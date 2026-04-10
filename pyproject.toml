@@ -1,5 +1,5 @@
 [project]
-name = "marimo_viser"
+name = "marimo-3dv"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
@@ -28,11 +28,12 @@ dependencies = [
     "traitlets>=5.14.3",
     "ty>=0.0.29",
     "tyro>=1.0.12",
+    "pyglet>=2.0.0",
     "viser>=1.0.26",
 ]
 
 [project.scripts]
-marimo-viser = "marimo_viser:main"
+marimo-3dv = "marimo_3dv:main"
 
 [build-system]
 requires = ["uv_build>=0.9.3,<0.10.0"]

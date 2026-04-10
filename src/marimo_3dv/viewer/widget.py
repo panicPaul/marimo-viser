@@ -42,7 +42,7 @@ from starlette.routing import WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 CameraConvention = Literal["opencv", "opengl", "blender", "colmap"]
-_ASSET_DIR = Path(__file__).with_name("assets")
+_ASSET_DIR = Path(__file__).resolve().parent / "assets"
 
 
 def _find_free_port(start: int = 8765, attempts: int = 64) -> int:

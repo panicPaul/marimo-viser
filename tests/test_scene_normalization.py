@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from marimo_viser.scene_normalization import (
+from marimo_3dv.ops.normalization import (
     apply_to_cameras,
     apply_to_points,
     pca_transform_from_points,

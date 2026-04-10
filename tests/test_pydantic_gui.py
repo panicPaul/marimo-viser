@@ -9,9 +9,9 @@ import torch
 from jaxtyping import Float
 from pydantic import BaseModel, ConfigDict, Field
 
-import marimo_viser.pydantic_gui as pgui
-from marimo_viser import form_gui, json_gui
-from marimo_viser.pydantic_gui import (
+import marimo_3dv.gui.pydantic as pgui
+from marimo_3dv import form_gui, json_gui
+from marimo_3dv.gui.pydantic import (
     _DIRECT_JSON_EDITOR_KEY,
     PydanticGui,
     PydanticJsonGui,

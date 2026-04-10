@@ -3,11 +3,11 @@
 # dependencies = [
 #     "marimo>=0.23.0",
 #     "numpy==2.4.4",
-#     "marimo-viser",
+#     "marimo-3dv",
 # ]
 #
 # [tool.uv.sources]
-# marimo-viser = { path = "..", editable = true }
+# marimo-3dv = { path = "..", editable = true }
 # ///
 """Example marimo notebook for the native viewer widget."""
 # NOTE: needs to be exectued from this directory if executed with uvx!!!
@@ -25,7 +25,7 @@ with app.setup:
     import torch
     from rich import print
 
-    from marimo_viser import CameraState, NativeViewerState, native_viewer
+    from marimo_3dv import CameraState, NativeViewerState, native_viewer
 
 
 @app.cell

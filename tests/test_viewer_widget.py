@@ -8,13 +8,13 @@ import numpy as np
 import pytest
 import torch
 
-from marimo_viser import (
+from marimo_3dv import (
     CameraState,
     NativeViewerState,
     ViewerClick,
     native_viewer,
 )
-from marimo_viser.viewer_widget import (
+from marimo_3dv.viewer.widget import (
     _convert_cam_to_world_between_conventions,
     _LatestOnlyRenderer,
     _normalize_frame,

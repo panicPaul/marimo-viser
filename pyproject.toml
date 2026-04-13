@@ -28,10 +28,11 @@ dependencies = [
     "traitlets>=5.14.3",
     "ty>=0.0.29",
     "tyro>=1.0.12",
-    "pyglet>=2.0.0",
     "viser>=1.0.26",
     "pip>=26.0.1",
-]
+    "gsplat>=1.5.3",
+    "pyside6>=6.11.0",
+] # TODO: go through it and remove unnecessary dependencies at some point.
 
 [project.scripts]
 marimo-3dv = "marimo_3dv:main"

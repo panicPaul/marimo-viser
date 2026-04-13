@@ -1,84 +1,32 @@
 from __future__ import annotations
 
+import os
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
 import numpy as np
 import pytest
+from pydantic import BaseModel
+from PySide6.QtWidgets import QApplication, QMainWindow, QTabWidget
 
+from marimo_3dv.viewer.controls import DesktopPydanticControls
 from marimo_3dv.viewer.desktop import DesktopViewer
+from marimo_3dv.viewer.widget import ViewerState
 
 
-class _StubWindow:
-    def __init__(
-        self,
-        *,
-        width: int,
-        height: int,
-        caption: str,
-        resizable: bool,
-    ) -> None:
-        self._size = (width, height)
-        self.invalid = False
-
-    def event(self, func):
-        return func
-
-    def get_size(self) -> tuple[int, int]:
-        return self._size
-
-    def clear(self) -> None:
-        return None
-
-    def close(self) -> None:
-        return None
-
-
-class _StubLabel:
-    def __init__(self, *args, **kwargs) -> None:
-        self.text = ""
-
-    def draw(self) -> None:
-        return None
-
-
-class _StubTexture:
-    def __init__(self, width: int, height: int) -> None:
-        self.width = width
-        self.height = height
-        self.blit_calls: list[tuple[int, int, int, int, int]] = []
-        self.deleted = False
-
-    def blit_into(self, image_data, x: int, y: int, z: int) -> None:
-        self.blit_calls.append((image_data.width, image_data.height, x, y, z))
-
-    def delete(self) -> None:
-        self.deleted = True
-
-
-class _StubSprite:
-    def __init__(self, texture: _StubTexture, x: int, y: int) -> None:
-        self.image = texture
-        self.width = texture.width
-        self.height = texture.height
-        self.scale_x = 1.0
-        self.scale_y = 1.0
-        self.draw_calls = 0
-
-    def draw(self) -> None:
-        self.draw_calls += 1
+@pytest.fixture
+def qapp() -> QApplication:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    return app
 
 
 def test_desktop_viewer_run_raises_render_errors(
     monkeypatch: pytest.MonkeyPatch,
+    qapp: QApplication,
 ) -> None:
-    import marimo_3dv.viewer.desktop as desktop_module
-
-    monkeypatch.setattr(desktop_module.pyglet.window, "Window", _StubWindow)
-    monkeypatch.setattr(desktop_module.pyglet.text, "Label", _StubLabel)
-    monkeypatch.setattr(
-        desktop_module.pyglet.clock,
-        "schedule_interval",
-        lambda callback, interval: None,
-    )
-    monkeypatch.setattr(desktop_module.pyglet.app, "run", lambda: None)
+    monkeypatch.setattr(qapp, "exec", lambda: 0)
 
     viewer = DesktopViewer(
         lambda camera_state: (_ for _ in ()).throw(RuntimeError("boom"))
@@ -88,77 +36,215 @@ def test_desktop_viewer_run_raises_render_errors(
         viewer.run()
 
 
-def test_desktop_viewer_reuses_texture_until_frame_size_changes(
-    monkeypatch: pytest.MonkeyPatch,
+def test_desktop_viewer_updates_camera_size_with_canvas_resize(
+    qapp: QApplication,
 ) -> None:
-    import marimo_3dv.viewer.desktop as desktop_module
-
-    created_textures: list[_StubTexture] = []
-
-    monkeypatch.setattr(desktop_module.pyglet.window, "Window", _StubWindow)
-    monkeypatch.setattr(desktop_module.pyglet.text, "Label", _StubLabel)
-    monkeypatch.setattr(desktop_module.pyglet.shapes, "Rectangle", _StubLabel)
-    monkeypatch.setattr(
-        desktop_module.pyglet.image.Texture,
-        "create",
-        lambda width, height, fmt: (
-            created_textures.append(_StubTexture(width, height))
-            or created_textures[-1]
+    del qapp
+    state = ViewerState(internal_render_max_side=None)
+    viewer = DesktopViewer(
+        lambda camera_state: np.zeros(
+            (camera_state.height, camera_state.width, 3), dtype=np.uint8
         ),
+        state=state,
+        width=320,
+        height=240,
     )
-    monkeypatch.setattr(desktop_module.pyglet.sprite, "Sprite", _StubSprite)
 
+    viewer._on_canvas_resize(640, 480)
+
+    assert viewer.get_camera_state().width == 640
+    assert viewer.get_camera_state().height == 480
+
+
+def test_desktop_viewer_caps_framebuffer_size_with_internal_render_max_side(
+    qapp: QApplication,
+) -> None:
+    del qapp
+    state = ViewerState(internal_render_max_side=3840)
+    viewer = DesktopViewer(
+        lambda camera_state: np.zeros(
+            (camera_state.height, camera_state.width, 3), dtype=np.uint8
+        ),
+        state=state,
+        width=1280,
+        height=720,
+    )
+
+    viewer._on_canvas_resize(1280, 720)
+
+    assert viewer.get_camera_state().width == 1280
+    assert viewer.get_camera_state().height == 720
+
+
+def test_desktop_viewer_uses_device_pixel_ratio_for_framebuffer_size(
+    qapp: QApplication,
+) -> None:
+    del qapp
+    state = ViewerState(internal_render_max_side=None)
+    viewer = DesktopViewer(
+        lambda camera_state: np.zeros(
+            (camera_state.height, camera_state.width, 3), dtype=np.uint8
+        ),
+        state=state,
+        width=640,
+        height=480,
+    )
+
+    viewer._on_canvas_resize(640, 480)
+    viewer._canvas.devicePixelRatioF = lambda: 2.0  # type: ignore[method-assign]
+    viewer._sync_camera_size_from_framebuffer()
+
+    assert viewer.get_camera_state().width == 1280
+    assert viewer.get_camera_state().height == 960
+
+
+def test_desktop_viewer_caps_hidpi_framebuffer_size_with_internal_max_side(
+    qapp: QApplication,
+) -> None:
+    del qapp
+    state = ViewerState(internal_render_max_side=1000)
+    viewer = DesktopViewer(
+        lambda camera_state: np.zeros(
+            (camera_state.height, camera_state.width, 3), dtype=np.uint8
+        ),
+        state=state,
+        width=640,
+        height=480,
+    )
+
+    viewer._on_canvas_resize(640, 480)
+    viewer._canvas.devicePixelRatioF = lambda: 2.0  # type: ignore[method-assign]
+    viewer._sync_camera_size_from_framebuffer()
+
+    assert viewer.get_camera_state().width == 1000
+    assert viewer.get_camera_state().height == 750
+
+
+def test_desktop_viewer_uses_interactive_max_side_while_dragging(
+    qapp: QApplication,
+) -> None:
+    del qapp
+    state = ViewerState(
+        internal_render_max_side=3840,
+        interactive_max_side=1200,
+    )
+    viewer = DesktopViewer(
+        lambda camera_state: np.zeros(
+            (camera_state.height, camera_state.width, 3), dtype=np.uint8
+        ),
+        state=state,
+        width=1280,
+        height=720,
+    )
+
+    viewer._on_canvas_resize(1280, 720)
+    viewer._canvas.devicePixelRatioF = lambda: 2.0  # type: ignore[method-assign]
+    viewer._sync_camera_size_from_framebuffer()
+    viewer._input.mode = "orbit"
+
+    render_camera = viewer._render_camera_state()
+
+    assert render_camera.width == 1200
+    assert render_camera.height == 675
+
+
+def test_desktop_viewer_uses_full_display_size_when_settled(
+    qapp: QApplication,
+) -> None:
+    del qapp
+    state = ViewerState(
+        internal_render_max_side=3840,
+        interactive_max_side=1200,
+    )
+    viewer = DesktopViewer(
+        lambda camera_state: np.zeros(
+            (camera_state.height, camera_state.width, 3), dtype=np.uint8
+        ),
+        state=state,
+        width=1280,
+        height=720,
+    )
+
+    viewer._on_canvas_resize(1280, 720)
+    viewer._canvas.devicePixelRatioF = lambda: 2.0  # type: ignore[method-assign]
+    viewer._sync_camera_size_from_framebuffer()
+
+    render_camera = viewer._render_camera_state()
+
+    assert render_camera.width == 2560
+    assert render_camera.height == 1440
+
+
+def test_desktop_viewer_get_snapshot_returns_copy(
+    qapp: QApplication,
+) -> None:
+    del qapp
+    viewer = DesktopViewer(
+        lambda camera_state: np.zeros(
+            (camera_state.height, camera_state.width, 3), dtype=np.uint8
+        )
+    )
+    viewer._latest_frame = np.full((4, 5, 3), 17, dtype=np.uint8)
+
+    snapshot = viewer.get_snapshot()
+    snapshot[0, 0, 0] = 99
+
+    assert viewer._latest_frame[0, 0, 0] == 17
+
+
+def test_desktop_viewer_defaults_stats_on_without_explicit_state(
+    qapp: QApplication,
+) -> None:
+    del qapp
     viewer = DesktopViewer(
         lambda camera_state: np.zeros(
             (camera_state.height, camera_state.width, 3), dtype=np.uint8
         )
     )
 
-    viewer._draw_frame(np.zeros((20, 10, 3), dtype=np.uint8))
-    first_texture = created_textures[-1]
-    viewer._draw_frame(np.zeros((20, 10, 3), dtype=np.uint8))
-    viewer._draw_frame(np.zeros((10, 5, 3), dtype=np.uint8))
-
-    assert len(created_textures) == 2
-    assert first_texture.deleted is True
-    assert created_textures[-1].deleted is False
+    assert viewer._state.show_stats is True
 
 
-def test_desktop_viewer_keeps_stable_scale_with_reused_sprite(
-    monkeypatch: pytest.MonkeyPatch,
+def test_desktop_controls_attach_creates_dock_with_tabs(
+    qapp: QApplication,
 ) -> None:
-    import marimo_3dv.viewer.desktop as desktop_module
+    del qapp
 
-    created_textures: list[_StubTexture] = []
+    class _InnerConfig(BaseModel):
+        threshold: float = 0.5
 
-    monkeypatch.setattr(desktop_module.pyglet.window, "Window", _StubWindow)
-    monkeypatch.setattr(desktop_module.pyglet.text, "Label", _StubLabel)
-    monkeypatch.setattr(desktop_module.pyglet.shapes, "Rectangle", _StubLabel)
-    monkeypatch.setattr(
-        desktop_module.pyglet.image.Texture,
-        "create",
-        lambda width, height, fmt: (
-            created_textures.append(_StubTexture(width, height))
-            or created_textures[-1]
-        ),
-    )
-    monkeypatch.setattr(desktop_module.pyglet.sprite, "Sprite", _StubSprite)
+    class _OuterConfig(BaseModel):
+        viewer: _InnerConfig = _InnerConfig()
+        pipeline: _InnerConfig = _InnerConfig()
 
+    controls = DesktopPydanticControls(_OuterConfig, label="Viewer Controls")
+    window = QMainWindow()
+
+    controls.attach(window)
+
+    assert controls.dock_widget is not None
+    assert controls.dock_widget.windowTitle() == "Viewer Controls"
+    tab_widget = controls.dock_widget.findChild(QTabWidget)
+    assert tab_widget is not None
+    assert tab_widget.count() == 2
+
+
+def test_desktop_viewer_expands_window_width_for_controls(
+    qapp: QApplication,
+) -> None:
+    del qapp
+
+    class _ControlsConfig(BaseModel):
+        enabled: bool = True
+
+    controls = DesktopPydanticControls(_ControlsConfig)
     viewer = DesktopViewer(
         lambda camera_state: np.zeros(
             (camera_state.height, camera_state.width, 3), dtype=np.uint8
-        )
-    )
-    monkeypatch.setattr(
-        viewer,
-        "_get_framebuffer_size",
-        lambda: (20, 40),
+        ),
+        controls=controls,
+        width=640,
+        height=480,
     )
 
-    viewer._draw_frame(np.zeros((20, 10, 3), dtype=np.uint8))
-    first_scale = (viewer._frame_sprite.scale_x, viewer._frame_sprite.scale_y)
-    viewer._draw_frame(np.zeros((20, 10, 3), dtype=np.uint8))
-    second_scale = (viewer._frame_sprite.scale_x, viewer._frame_sprite.scale_y)
-
-    assert first_scale == (2.0, 2.0)
-    assert second_scale == (2.0, 2.0)
+    assert viewer._window.width() == 640 + controls.panel_width

@@ -7,6 +7,7 @@ from typing import Any
 
 import marimo as mo
 
+from marimo_3dv.viewer.controls import DesktopPydanticControls
 from marimo_3dv.viewer.defaults import (
     CombinedViewerPipelineControlsHandle,
     ViewerCameraConfig,
@@ -22,7 +23,9 @@ from marimo_3dv.viewer.defaults import (
     apply_viewer_pipeline_config,
     viewer_controls_config,
     viewer_controls_gui,
+    viewer_controls_handle,
     viewer_pipeline_controls_gui,
+    viewer_pipeline_controls_handle,
 )
 from marimo_3dv.viewer.desktop import DesktopViewer, desktop_viewer
 from marimo_3dv.viewer.widget import (
@@ -39,6 +42,7 @@ def Viewer(
     *,
     state: ViewerState | None = None,
     title: str = "marimo-3dv viewer",
+    controls: DesktopPydanticControls[Any] | None = None,
 ) -> MarimoViewer | DesktopViewer:
     """Create the appropriate viewer backend for the current runtime.
 
@@ -58,6 +62,7 @@ def Viewer(
         width=window_width,
         height=window_height,
         title=title,
+        controls=controls,
     )
     viewer.run()
     return viewer
@@ -83,5 +88,7 @@ __all__ = [
     "apply_viewer_pipeline_config",
     "viewer_controls_config",
     "viewer_controls_gui",
+    "viewer_controls_handle",
     "viewer_pipeline_controls_gui",
+    "viewer_pipeline_controls_handle",
 ]

@@ -74,7 +74,9 @@ from marimo_3dv.viewer import (
     apply_viewer_pipeline_config,
     viewer_controls_config,
     viewer_controls_gui,
+    viewer_controls_handle,
     viewer_pipeline_controls_gui,
+    viewer_pipeline_controls_handle,
 )
 
 __all__ = [
@@ -149,5 +151,7 @@ __all__ = [
     "splat_load_form",
     "viewer_controls_config",
     "viewer_controls_gui",
+    "viewer_controls_handle",
     "viewer_pipeline_controls_gui",
+    "viewer_pipeline_controls_handle",
 ]

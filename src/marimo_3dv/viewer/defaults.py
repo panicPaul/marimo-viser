@@ -5,9 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar
 
+import marimo as mo
 from pydantic import BaseModel, Field, create_model
 
 from marimo_3dv.gui.pydantic import form_gui
+from marimo_3dv.viewer.controls import DesktopPydanticControls
 from marimo_3dv.viewer.widget import ViewerState
 
 if TYPE_CHECKING:
@@ -44,7 +46,7 @@ class ViewerOverlayConfig(BaseModel):
     show_axes: bool = Field(default=True)
     show_horizon: bool = Field(default=False)
     show_origin: bool = Field(default=False)
-    show_stats: bool = Field(default=False)
+    show_stats: bool = Field(default=True)
 
 
 class ViewerRenderConfig(BaseModel):
@@ -94,6 +96,14 @@ class ViewerControlsHandle:
     default_config: ViewerControlsConfig
     gui: Any
 
+    @property
+    def value(self) -> ViewerControlsConfig:
+        """Return the latest controls value."""
+        value = getattr(self.gui, "value", None)
+        if value is None:
+            return self.default_config
+        return value
+
 
 @dataclass(frozen=True)
 class CombinedViewerPipelineControlsHandle(Generic[PipelineConfigT]):
@@ -104,6 +114,14 @@ class CombinedViewerPipelineControlsHandle(Generic[PipelineConfigT]):
     gui: Any
     pipeline_config_model: type[PipelineConfigT]
     pipeline_default_config: PipelineConfigT
+
+    @property
+    def value(self) -> BaseModel:
+        """Return the latest combined controls value."""
+        value = getattr(self.gui, "value", None)
+        if value is None:
+            return self.default_config
+        return value
 
 
 def viewer_controls_config(
@@ -184,25 +202,48 @@ def apply_viewer_config(
     )
 
 
+def viewer_controls_handle(
+    viewer_state: ViewerState,
+    *,
+    label: str = "",
+    default_config: ViewerControlsConfig | None = None,
+) -> ViewerControlsHandle:
+    """Build a live controls handle for the default viewer controls."""
+    resolved_default_config = default_config or viewer_controls_config(
+        viewer_state
+    )
+    gui = (
+        form_gui(
+            ViewerControlsConfig,
+            value=resolved_default_config,
+            label=label,
+            live_update=True,
+        )
+        if mo.running_in_notebook()
+        else DesktopPydanticControls(
+            ViewerControlsConfig,
+            value=resolved_default_config,
+            label=label,
+        )
+    )
+    return ViewerControlsHandle(
+        config_model=ViewerControlsConfig,
+        default_config=resolved_default_config,
+        gui=gui,
+    )
+
+
 def viewer_controls_gui(
     viewer_state: ViewerState,
     *,
     label: str = "",
     default_config: ViewerControlsConfig | None = None,
 ) -> ViewerControlsHandle:
-    """Build a live notebook GUI for the default viewer controls."""
-    resolved_default_config = default_config or viewer_controls_config(
-        viewer_state
-    )
-    return ViewerControlsHandle(
-        config_model=ViewerControlsConfig,
-        default_config=resolved_default_config,
-        gui=form_gui(
-            ViewerControlsConfig,
-            value=resolved_default_config,
-            label=label,
-            live_update=True,
-        ),
+    """Build a live controls handle for the default viewer controls."""
+    return viewer_controls_handle(
+        viewer_state,
+        label=label,
+        default_config=default_config,
     )
 
 
@@ -222,7 +263,7 @@ def _combined_viewer_pipeline_model(
     )
 
 
-def viewer_pipeline_controls_gui(
+def viewer_pipeline_controls_handle(
     viewer_state: ViewerState,
     pipeline_result: ViewerPipelineResult[Any, Any, Any],
     *,
@@ -239,17 +280,42 @@ def viewer_pipeline_controls_gui(
         viewer=resolved_viewer_default,
         pipeline=pipeline_result.default_config,
     )
-    return CombinedViewerPipelineControlsHandle(
-        config_model=combined_model,
-        default_config=default_config,
-        gui=form_gui(
+    gui = (
+        form_gui(
             combined_model,
             value=default_config,
             label=label,
             live_update=True,
-        ),
+        )
+        if mo.running_in_notebook()
+        else DesktopPydanticControls(
+            combined_model,
+            value=default_config,
+            label=label,
+        )
+    )
+    return CombinedViewerPipelineControlsHandle(
+        config_model=combined_model,
+        default_config=default_config,
+        gui=gui,
         pipeline_config_model=pipeline_config_model,
         pipeline_default_config=pipeline_result.default_config,
+    )
+
+
+def viewer_pipeline_controls_gui(
+    viewer_state: ViewerState,
+    pipeline_result: ViewerPipelineResult[Any, Any, Any],
+    *,
+    label: str = "",
+    viewer_default_config: ViewerControlsConfig | None = None,
+) -> CombinedViewerPipelineControlsHandle[Any]:
+    """Build one live config tree containing viewer and pipeline controls."""
+    return viewer_pipeline_controls_handle(
+        viewer_state,
+        pipeline_result,
+        label=label,
+        viewer_default_config=viewer_default_config,
     )
 
 
@@ -282,5 +348,7 @@ __all__ = [
     "apply_viewer_pipeline_config",
     "viewer_controls_config",
     "viewer_controls_gui",
+    "viewer_controls_handle",
     "viewer_pipeline_controls_gui",
+    "viewer_pipeline_controls_handle",
 ]

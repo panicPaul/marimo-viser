@@ -1,4 +1,4 @@
-"""Desktop offline viewer using pyglet for low-overhead OpenGL display."""
+"""Desktop offline viewer backed by Qt with docked controls support."""
 
 from __future__ import annotations
 
@@ -10,11 +10,21 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
-import pyglet
-import pyglet.shapes
-import pyglet.text
-import pyglet.window
+from PySide6.QtCore import QRect, Qt, QTimer
+from PySide6.QtGui import (
+    QCloseEvent,
+    QColor,
+    QKeyEvent,
+    QMouseEvent,
+    QPainter,
+    QPen,
+    QPixmap,
+    QResizeEvent,
+    QWheelEvent,
+)
+from PySide6.QtWidgets import QApplication, QMainWindow, QWidget
 
+from marimo_3dv.viewer.controls import DesktopPydanticControls
 from marimo_3dv.viewer.widget import (
     CameraState,
     ViewerClick,
@@ -26,8 +36,6 @@ from marimo_3dv.viewer.widget import (
 
 _ORBIT_SENSITIVITY = 0.008
 _SCROLL_ZOOM_SENSITIVITY = 0.0015
-_MIN_FOV = 5.0
-_MAX_FOV = 170.0
 _MIN_ORBIT_DISTANCE = 0.05
 _MAX_ORBIT_DISTANCE = 1e5
 _CLICK_THRESHOLD_PIXELS = 4.0
@@ -38,25 +46,84 @@ class _InputState:
     """Mutable per-frame input state."""
 
     mode: str | None = None
-    keys_held: set = field(default_factory=set)
+    keys_held: set[int] = field(default_factory=set)
     drag_start: tuple[int, int] | None = None
     drag_exceeded_click_threshold: bool = False
 
 
+class _ViewerCanvas(QWidget):
+    """Central Qt widget that displays frames and forwards interactions."""
+
+    def __init__(
+        self, viewer: DesktopViewer, *, width: int, height: int
+    ) -> None:
+        super().__init__()
+        self._viewer = viewer
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setMouseTracking(True)
+        self.resize(width, height)
+
+    def paintEvent(self, event) -> None:  # noqa: ANN001
+        del event
+        self._viewer._paint_canvas(self)
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        size = event.size()
+        width, height = size.width(), size.height()
+        self._viewer._on_canvas_resize(width, height)
+        super().resizeEvent(event)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        self._viewer._on_mouse_press(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        self._viewer._on_mouse_release(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        self._viewer._on_mouse_move(event)
+
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        self._viewer._on_wheel(event)
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        self._viewer._on_key_press(event)
+
+    def keyReleaseEvent(self, event: QKeyEvent) -> None:
+        self._viewer._on_key_release(event)
+
+
+class _ViewerMainWindow(QMainWindow):
+    """Main window that hosts the canvas and optional controls dock."""
+
+    def __init__(self, viewer: DesktopViewer, *, title: str) -> None:
+        super().__init__()
+        self._viewer = viewer
+        self.setWindowTitle(title)
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        self._viewer._running = False
+        super().closeEvent(event)
+
+
 class DesktopViewer:
-    """Blocking desktop viewer window backed by pyglet."""
+    """Blocking desktop viewer window backed by Qt."""
 
     def __init__(
         self,
         render_fn: Callable[[CameraState], Any],
         *,
         state: ViewerState | None = None,
+        controls: DesktopPydanticControls[Any] | None = None,
         width: int = 1280,
         height: int = 720,
         title: str = "marimo-3dv desktop viewer",
     ) -> None:
         self._render_fn = render_fn
-        self._state = state or ViewerState()
+        if state is None:
+            self._state = ViewerState(show_stats=True)
+        else:
+            self._state = state
+        self._controls = controls
         self._logical_window_size = (width, height)
 
         camera = self._state.camera_state
@@ -70,152 +137,152 @@ class DesktopViewer:
         self._frame_lock = threading.Lock()
         self._running = False
         self._input = _InputState()
-        self._frame_texture: pyglet.image.Texture | None = None
-        self._frame_sprite: pyglet.sprite.Sprite | None = None
-        self._frame_texture_size: tuple[int, int] | None = None
-
-        # Track render timing for stats.
-        self._last_render_ms: float = 0.0
-        self._last_viewer_fps: float = 0.0
+        self._last_render_ms = 0.0
+        self._last_viewer_fps = 0.0
         self._draw_frame_times: list[float] = []
-        self._last_render_fps: float = 0.0
+        self._last_render_fps = 0.0
         self._render_frame_times: list[float] = []
+        self._last_render_size: tuple[int, int] = (
+            self._state.camera_state.width,
+            self._state.camera_state.height,
+        )
+        self._last_mouse_position: tuple[int, int] | None = None
 
         self._state._reset_camera_callback = self._on_camera_set
+        self._app = _qt_application()
+        self._window = _ViewerMainWindow(self, title=title)
+        self._canvas = _ViewerCanvas(self, width=width, height=height)
+        self._window.setCentralWidget(self._canvas)
+        total_width = width
+        if self._controls is not None:
+            total_width += self._controls.panel_width
+        self._window.resize(total_width, height)
+        if self._controls is not None:
+            self._controls.attach(self._window)
 
-        self._window = pyglet.window.Window(
-            width=width, height=height, caption=title, resizable=True
-        )
-        self._stats_shadow = pyglet.shapes.Rectangle(
-            x=18,
-            y=height - 134,
-            width=276,
-            height=126,
-            color=(15, 23, 42),
-        )
-        self._stats_shadow.opacity = 26
-        self._stats_background = pyglet.shapes.Rectangle(
-            x=16,
-            y=height - 136,
-            width=276,
-            height=126,
-            color=(248, 251, 255),
-        )
-        self._stats_background.opacity = 236
-        self._stats_border = pyglet.shapes.Rectangle(
-            x=16,
-            y=height - 136,
-            width=276,
-            height=1,
-            color=(222, 231, 240),
-        )
-        self._stats_title = pyglet.text.Label(
-            "Stats",
-            font_name="monospace",
-            font_size=12,
-            x=28,
-            y=height - 24,
-            color=(71, 85, 105, 255),
-            anchor_x="left",
-            anchor_y="top",
-        )
-        self._stats_label = pyglet.text.Label(
-            "",
-            font_name="monospace",
-            font_size=14,
-            x=28,
-            y=height - 42,
-            color=(15, 23, 42, 255),
-            multiline=True,
-            width=238,
-            anchor_x="left",
-            anchor_y="top",
-        )
-        self._register_handlers()
+        self._tick_timer = QTimer()
+        self._tick_timer.timeout.connect(self._on_tick)
+        self._last_tick_time = time.perf_counter()
 
     # ------------------------------------------------------------------
     # Frame display
     # ------------------------------------------------------------------
 
-    def _draw_frame(self, frame: np.ndarray) -> None:
-        """Upload frame into a reusable texture and draw it scaled."""
-        height, width = frame.shape[:2]
-        flipped = np.ascontiguousarray(frame[::-1])
-        image_data = pyglet.image.ImageData(
-            width, height, "RGB", flipped.tobytes()
-        )
-        texture = self._ensure_frame_texture(width=width, height=height)
-        texture.blit_into(image_data, 0, 0, 0)
-        win_w, win_h = self._get_framebuffer_size()
-        assert self._frame_sprite is not None
-        self._frame_sprite.scale_x = win_w / texture.width
-        self._frame_sprite.scale_y = win_h / texture.height
-        self._frame_sprite.draw()
+    def _paint_canvas(self, canvas: QWidget) -> None:
+        now = time.perf_counter()
+        self._draw_frame_times.append(now)
+        cutoff = now - 1.0
+        self._draw_frame_times = [
+            timestamp
+            for timestamp in self._draw_frame_times
+            if timestamp > cutoff
+        ]
+        self._last_viewer_fps = float(len(self._draw_frame_times))
 
-    def _ensure_frame_texture(
-        self, *, width: int, height: int
-    ) -> pyglet.image.Texture:
-        """Return a reusable RGB texture sized for the current frame."""
-        texture_size = (width, height)
-        if (
-            self._frame_texture is not None
-            and self._frame_texture_size == texture_size
-        ):
-            return self._frame_texture
-        self._release_frame_texture()
-        texture = pyglet.image.Texture.create(
-            width=width,
-            height=height,
-            fmt=pyglet.gl.GL_RGB,
-        )
-        self._frame_texture = texture
-        self._frame_texture_size = texture_size
-        self._frame_sprite = pyglet.sprite.Sprite(texture, x=0, y=0)
-        return texture
+        painter = QPainter(canvas)
+        painter.fillRect(canvas.rect(), Qt.GlobalColor.black)
+        with self._frame_lock:
+            frame = (
+                None
+                if self._latest_frame is None
+                else self._latest_frame.copy()
+            )
+        if frame is not None:
+            pixmap = _pixmap_from_frame(frame)
+            painter.drawPixmap(canvas.rect(), pixmap)
+        if self._state.show_stats:
+            self._draw_stats_overlay(painter, canvas.rect())
+        painter.end()
 
-    def _release_frame_texture(self) -> None:
-        """Release the current GPU texture and sprite, if any."""
-        self._frame_sprite = None
-        if self._frame_texture is not None:
-            self._frame_texture.delete()
-            self._frame_texture = None
-        self._frame_texture_size = None
+    def _draw_stats_overlay(
+        self, painter: QPainter, canvas_rect: QRect
+    ) -> None:
+        stats_rect = QRect(16, 16, 292, 126)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(_qt_color(248, 251, 255, 236))
+        painter.drawRoundedRect(stats_rect, 10, 10)
+        painter.setPen(QPen(_qt_color(15, 23, 42, 255)))
+        cam = self._state.camera_state
+        framebuffer_width, framebuffer_height = self._get_framebuffer_size()
+        stats_text = (
+            f"Viewer {self._last_viewer_fps:.0f}fps\n"
+            f"Render {self._last_render_ms:.0f}ms {self._last_render_fps:.0f}fps\n"
+            f"Window {canvas_rect.width()}x{canvas_rect.height()}\n"
+            f"Display {framebuffer_width}x{framebuffer_height}\n"
+            f"Render {self._last_render_size[0]}x{self._last_render_size[1]}"
+        )
+        painter.drawText(
+            stats_rect.adjusted(14, 14, -14, -14),
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
+            stats_text,
+        )
 
     # ------------------------------------------------------------------
     # Camera math
     # ------------------------------------------------------------------
 
     def _get_window_size(self) -> tuple[int, int]:
-        """Return the tracked live window size used for interaction coordinates."""
+        """Return the live canvas size used for interaction coordinates."""
         return self._logical_window_size
 
     def _get_framebuffer_size(self) -> tuple[int, int]:
-        """Return the drawable framebuffer size, falling back to window size."""
-        get_framebuffer_size = getattr(
-            self._window, "get_framebuffer_size", None
+        """Return the drawable canvas size in device pixels."""
+        logical_width, logical_height = self._logical_window_size
+        device_pixel_ratio = self._canvas.devicePixelRatioF()
+        return (
+            max(1, round(logical_width * device_pixel_ratio)),
+            max(1, round(logical_height * device_pixel_ratio)),
         )
-        if get_framebuffer_size is None:
-            return self._window.get_size()
-        return get_framebuffer_size()
 
     def _sync_camera_size_from_framebuffer(self) -> None:
         """Match render resolution to the drawable framebuffer size."""
         framebuffer_width, framebuffer_height = self._get_framebuffer_size()
+        max_side = self._state.internal_render_max_side
         target_width = framebuffer_width
         target_height = framebuffer_height
-        max_side = self._state.internal_render_max_side
         if max_side is not None:
             larger_axis = max(framebuffer_width, framebuffer_height)
             if larger_axis > max_side:
-                downscale = max_side / larger_axis
-                target_width = max(1, round(framebuffer_width * downscale))
-                target_height = max(1, round(framebuffer_height * downscale))
+                scale = max_side / larger_axis
+                target_width = max(1, round(framebuffer_width * scale))
+                target_height = max(1, round(framebuffer_height * scale))
         camera = self._state.camera_state
         if camera.width != target_width or camera.height != target_height:
             self._state.camera_state = camera.with_size(
                 target_width,
                 target_height,
             )
+
+    def _camera_state_with_max_side(
+        self, camera_state: CameraState, max_side: int | None
+    ) -> CameraState:
+        """Return a camera state with its larger axis capped to ``max_side``."""
+        if max_side is None:
+            return camera_state
+        larger_axis = max(camera_state.width, camera_state.height)
+        if larger_axis <= max_side:
+            return camera_state
+        scale = max_side / larger_axis
+        target_width = max(1, round(camera_state.width * scale))
+        target_height = max(1, round(camera_state.height * scale))
+        return camera_state.with_size(target_width, target_height)
+
+    def _is_interacting(self) -> bool:
+        """Return whether the user is actively manipulating the view."""
+        return self._input.mode is not None or bool(self._input.keys_held)
+
+    def _render_camera_state(self) -> CameraState:
+        """Return the effective render camera state for the current mode."""
+        camera_state = self._camera_state_with_max_side(
+            self._state.camera_state,
+            self._state.internal_render_max_side,
+        )
+        if self._is_interacting():
+            camera_state = self._camera_state_with_max_side(
+                camera_state,
+                self._state.interactive_max_side,
+            )
+        return camera_state
 
     def _camera_axes(
         self,
@@ -237,7 +304,7 @@ class DesktopViewer:
         )
 
     def _viewer_up_vector(self) -> np.ndarray:
-        """Return the desktop viewer up vector matching the JS controller."""
+        """Return the desktop viewer up vector matching the notebook viewer."""
         return _normalize(
             self._viewer_frame_rotation() @ np.array([0.0, -1.0, 0.0])
         )
@@ -289,10 +356,9 @@ class DesktopViewer:
         self._state.camera_state = next_camera
 
     def _apply_orbit(self, dx: int, dy: int) -> None:
-        """Orbit around the explicit tracked target using JS-equivalent math."""
+        """Orbit around the tracked target using JS-equivalent math."""
         viewer_up = self._viewer_up_vector()
         offset = self._position - self._target
-        radius = max(_MIN_ORBIT_DISTANCE, float(np.linalg.norm(offset)))
         yaw_rotation = _rot_axis(viewer_up, -dx * _ORBIT_SENSITIVITY)
         yawed_offset = yaw_rotation @ offset
         yawed_forward = _normalize(-yawed_offset)
@@ -309,7 +375,7 @@ class DesktopViewer:
         self._set_camera_pose(new_position, self._target)
 
     def _apply_pan(self, dx: int, dy: int) -> None:
-        """Pan in the image plane using the JS orbit-distance/FOV scaling."""
+        """Pan in the image plane using orbit-distance/FOV scaling."""
         _position, right, up, _forward = self._camera_axes()
         cam = self._state.camera_state
         _window_width, window_height = self._get_window_size()
@@ -344,149 +410,112 @@ class DesktopViewer:
             return
         position, right, up, forward = self._camera_axes()
         speed = self._state.keyboard_move_speed * dt * 60.0
-        if pyglet.window.key.LSHIFT in keys or pyglet.window.key.RSHIFT in keys:
+        if Qt.Key.Key_Shift in keys:
             speed *= self._state.keyboard_sprint_multiplier
         delta = np.zeros(3)
-        if pyglet.window.key.W in keys:
+        if Qt.Key.Key_W in keys:
             delta += forward * speed
-        if pyglet.window.key.S in keys:
+        if Qt.Key.Key_S in keys:
             delta -= forward * speed
-        if pyglet.window.key.A in keys:
+        if Qt.Key.Key_A in keys:
             delta -= right * speed
-        if pyglet.window.key.D in keys:
+        if Qt.Key.Key_D in keys:
             delta += right * speed
-        if pyglet.window.key.Q in keys:
+        if Qt.Key.Key_Q in keys:
             delta -= up * speed
-        if pyglet.window.key.E in keys:
+        if Qt.Key.Key_E in keys:
             delta += up * speed
         if np.linalg.norm(delta) > 0:
             self._set_camera_pose(position + delta, self._target + delta)
 
     # ------------------------------------------------------------------
-    # Event handlers
+    # Input handling
     # ------------------------------------------------------------------
 
-    def _register_handlers(self) -> None:
-        @self._window.event
-        def on_draw() -> None:
-            now = time.perf_counter()
-            self._draw_frame_times.append(now)
-            cutoff = now - 1.0
-            self._draw_frame_times = [
-                timestamp
-                for timestamp in self._draw_frame_times
-                if timestamp > cutoff
-            ]
-            self._last_viewer_fps = float(len(self._draw_frame_times))
+    def _on_canvas_resize(self, width: int, height: int) -> None:
+        self._logical_window_size = (max(1, width), max(1, height))
+        self._sync_camera_size_from_framebuffer()
 
-            self._window.clear()
-            with self._frame_lock:
-                frame = self._latest_frame
-            if frame is not None:
-                self._draw_frame(frame)
-            # Stats overlay.
-            cam = self._state.camera_state
-            if self._state.show_stats:
-                logical_width, logical_height = self._get_window_size()
-                render_width, render_height = cam.width, cam.height
-                self._stats_shadow.draw()
-                self._stats_background.draw()
-                self._stats_border.draw()
-                self._stats_title.draw()
-                self._stats_label.text = (
-                    f"Viewer {self._last_viewer_fps:.0f}fps\n"
-                    f"Render {self._last_render_ms:.0f}ms {self._last_render_fps:.0f}fps\n"
-                    f"Window {logical_width}x{logical_height}\n"
-                    f"Render {render_width}x{render_height}"
+    def _on_mouse_press(self, event: QMouseEvent) -> None:
+        position = event.position().toPoint()
+        x, y = position.x(), position.y()
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._input.mode = "orbit"
+            self._input.drag_start = (x, y)
+            self._input.drag_exceeded_click_threshold = False
+        elif event.button() == Qt.MouseButton.RightButton:
+            self._input.mode = "pan"
+            self._input.drag_start = (x, y)
+            self._input.drag_exceeded_click_threshold = False
+        self._last_mouse_position = (x, y)
+
+    def _on_mouse_release(self, event: QMouseEvent) -> None:
+        position = event.position().toPoint()
+        x, y = position.x(), position.y()
+        if event.button() == Qt.MouseButton.LeftButton:
+            should_emit_click = (
+                self._input.drag_start is not None
+                and not self._input.drag_exceeded_click_threshold
+            )
+            if should_emit_click:
+                win_w, win_h = self._get_window_size()
+                framebuffer_w, framebuffer_h = self._get_framebuffer_size()
+                scale_x = framebuffer_w / max(1, win_w)
+                scale_y = framebuffer_h / max(1, win_h)
+                self._state.last_click = ViewerClick(
+                    x=round(x * scale_x),
+                    y=round((win_h - 1 - y) * scale_y),
+                    width=framebuffer_w,
+                    height=framebuffer_h,
+                    camera_state=self._state.camera_state,
                 )
-                self._stats_label.draw()
+        if event.button() in {
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.RightButton,
+        }:
+            self._input.mode = None
+            self._input.drag_start = None
+            self._input.drag_exceeded_click_threshold = False
+        self._last_mouse_position = (x, y)
 
-        @self._window.event
-        def on_resize(width: int, height: int) -> None:
-            self._logical_window_size = (max(1, width), max(1, height))
-            self._sync_camera_size_from_framebuffer()
-            self._stats_shadow.y = height - 134
-            self._stats_background.y = height - 136
-            self._stats_border.y = height - 136
-            self._stats_title.y = height - 24
-            self._stats_label.y = height - 42
-
-        @self._window.event
-        def on_mouse_press(x: int, y: int, button: int, modifiers: int) -> None:
-            if button == pyglet.window.mouse.LEFT:
-                self._input.mode = "orbit"
-                self._input.drag_start = (x, y)
-                self._input.drag_exceeded_click_threshold = False
-            elif button == pyglet.window.mouse.RIGHT:
-                self._input.mode = "pan"
-                self._input.drag_start = (x, y)
-                self._input.drag_exceeded_click_threshold = False
-
-        @self._window.event
-        def on_mouse_release(
-            x: int, y: int, button: int, modifiers: int
-        ) -> None:
-            if button == pyglet.window.mouse.LEFT:
-                should_emit_click = (
-                    self._input.drag_start is not None
-                    and not self._input.drag_exceeded_click_threshold
+    def _on_mouse_move(self, event: QMouseEvent) -> None:
+        position = event.position().toPoint()
+        x, y = position.x(), position.y()
+        if self._last_mouse_position is None:
+            self._last_mouse_position = (x, y)
+            return
+        last_x, last_y = self._last_mouse_position
+        dx = x - last_x
+        dy = y - last_y
+        self._last_mouse_position = (x, y)
+        if self._input.drag_start is not None:
+            drag_distance = float(
+                np.hypot(
+                    x - self._input.drag_start[0],
+                    y - self._input.drag_start[1],
                 )
-                if should_emit_click:
-                    win_w, win_h = self._get_window_size()
-                    framebuffer_w, framebuffer_h = self._get_framebuffer_size()
-                    scale_x = framebuffer_w / max(1, win_w)
-                    scale_y = framebuffer_h / max(1, win_h)
-                    self._state.last_click = ViewerClick(
-                        x=round(x * scale_x),
-                        y=round((win_h - 1 - y) * scale_y),
-                        width=framebuffer_w,
-                        height=framebuffer_h,
-                        camera_state=self._state.camera_state,
-                    )
-            if button in {
-                pyglet.window.mouse.LEFT,
-                pyglet.window.mouse.RIGHT,
-            }:
-                self._input.mode = None
-                self._input.drag_start = None
-                self._input.drag_exceeded_click_threshold = False
+            )
+            if drag_distance > _CLICK_THRESHOLD_PIXELS:
+                self._input.drag_exceeded_click_threshold = True
+        if self._input.mode == "orbit":
+            self._apply_orbit(dx, dy)
+        elif self._input.mode == "pan":
+            self._apply_pan(dx, -dy)
 
-        @self._window.event
-        def on_mouse_drag(
-            x: int, y: int, dx: int, dy: int, buttons: int, modifiers: int
-        ) -> None:
-            if self._input.drag_start is not None:
-                drag_distance = float(
-                    np.hypot(
-                        x - self._input.drag_start[0],
-                        y - self._input.drag_start[1],
-                    )
-                )
-                if drag_distance > _CLICK_THRESHOLD_PIXELS:
-                    self._input.drag_exceeded_click_threshold = True
-            if self._input.mode == "orbit":
-                self._apply_orbit(dx, -dy)
-            elif self._input.mode == "pan":
-                self._apply_pan(dx, dy)
+    def _on_wheel(self, event: QWheelEvent) -> None:
+        delta = event.angleDelta().y() / 120.0
+        self._apply_dolly(delta)
 
-        @self._window.event
-        def on_mouse_scroll(
-            x: int, y: int, scroll_x: float, scroll_y: float
-        ) -> None:
-            self._apply_dolly(scroll_y)
+    def _on_key_press(self, event: QKeyEvent) -> None:
+        self._input.keys_held.add(event.key())
+        if event.key() == Qt.Key.Key_R:
+            self._state.reset_camera()
+        elif event.key() == Qt.Key.Key_Escape:
+            self._running = False
+            self._window.close()
 
-        @self._window.event
-        def on_key_press(symbol: int, modifiers: int) -> None:
-            self._input.keys_held.add(symbol)
-            if symbol == pyglet.window.key.R:
-                self._state.reset_camera()
-            elif symbol == pyglet.window.key.ESCAPE:
-                self._running = False
-                self._window.close()
-
-        @self._window.event
-        def on_key_release(symbol: int, modifiers: int) -> None:
-            self._input.keys_held.discard(symbol)
+    def _on_key_release(self, event: QKeyEvent) -> None:
+        self._input.keys_held.discard(event.key())
 
     # ------------------------------------------------------------------
     # Viewer state callbacks
@@ -506,17 +535,21 @@ class DesktopViewer:
         return _normalize_frame(raw)
 
     def _render_loop(self) -> None:
-        """Background thread: render frames as fast as possible."""
+        """Background thread: render frames continuously."""
         while self._running:
             try:
                 start = time.perf_counter()
-                camera_state = self._state.camera_state
+                camera_state = self._render_camera_state()
                 frame = self._render_once(camera_state)
                 elapsed_ms = (time.perf_counter() - start) * 1000.0
                 now = time.perf_counter()
                 with self._frame_lock:
                     self._latest_frame = frame
                     self._last_render_ms = elapsed_ms
+                    self._last_render_size = (
+                        camera_state.width,
+                        camera_state.height,
+                    )
                     self._render_frame_times.append(now)
                     cutoff = now - 1.0
                     self._render_frame_times = [
@@ -525,7 +558,6 @@ class DesktopViewer:
                         if timestamp > cutoff
                     ]
                     self._last_render_fps = float(len(self._render_frame_times))
-                self._window.invalid = True
             except Exception as exception:
                 self._render_error = exception
                 self._render_error_traceback = "".join(
@@ -536,12 +568,18 @@ class DesktopViewer:
                     )
                 )
                 self._running = False
-                pyglet.clock.schedule_once(lambda _dt: pyglet.app.exit(), 0.0)
+                QTimer.singleShot(0, self._app.quit)
                 return
 
-    def _tick(self, dt: float) -> None:
-        """Main-thread tick: apply held-key movement."""
+    def _on_tick(self) -> None:
+        """Main-thread tick: apply held-key movement and repaint."""
+        now = time.perf_counter()
+        dt = now - self._last_tick_time
+        self._last_tick_time = now
         self._apply_move(dt)
+        self._canvas.update()
+        if self._render_error is not None:
+            self._app.quit()
 
     # ------------------------------------------------------------------
     # Public API
@@ -549,26 +587,36 @@ class DesktopViewer:
 
     def run(self) -> None:
         """Start the render loop and show the window. Blocks until closed."""
-        initial_width, initial_height = self._window.get_size()
+        self._window.show()
+        self._app.processEvents()
         self._logical_window_size = (
-            max(1, initial_width),
-            max(1, initial_height),
+            max(1, self._canvas.width()),
+            max(1, self._canvas.height()),
         )
         self._sync_camera_size_from_framebuffer()
         initial_camera_state = self._state.camera_state
-        initial_frame = self._render_once(initial_camera_state)
+        initial_render_camera_state = self._render_camera_state()
+        initial_frame = self._render_once(initial_render_camera_state)
         with self._frame_lock:
             self._latest_frame = initial_frame
             self._last_render_ms = 0.0
+            self._last_render_size = (
+                initial_render_camera_state.width,
+                initial_render_camera_state.height,
+            )
 
         self._running = True
+        self._last_tick_time = time.perf_counter()
         render_thread = threading.Thread(target=self._render_loop, daemon=True)
         render_thread.start()
-        pyglet.clock.schedule(self._tick)
-        pyglet.app.run()
+        self._tick_timer.start(16)
+        self._app.exec()
+        self._tick_timer.stop()
         self._running = False
+        self._window.hide()
         render_thread.join(timeout=2.0)
-        self._release_frame_texture()
+        if self._controls is not None:
+            self._controls.shutdown()
         if self._render_error is not None:
             raise RuntimeError(
                 "Desktop viewer render loop failed.\n"
@@ -592,8 +640,36 @@ class DesktopViewer:
             return self._latest_frame.copy()
 
 
+def _qt_application() -> QApplication:
+    """Return a shared Qt application instance."""
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    return app
+
+
+def _pixmap_from_frame(frame: np.ndarray) -> QPixmap:
+    """Convert a uint8 RGB frame into a Qt pixmap."""
+    from PySide6.QtGui import QImage
+
+    rgb = np.ascontiguousarray(frame)
+    image = QImage(
+        rgb.data,
+        rgb.shape[1],
+        rgb.shape[0],
+        rgb.strides[0],
+        QImage.Format.Format_RGB888,
+    ).copy()
+    return QPixmap.fromImage(image)
+
+
+def _qt_color(red: int, green: int, blue: int, alpha: int) -> QColor:
+    """Return a Qt color value."""
+    return QColor(red, green, blue, alpha)
+
+
 def _rot_axis(axis: np.ndarray, angle: float) -> np.ndarray:
-    """Return a 3x3 rotation matrix for rotating `angle` radians around `axis`."""
+    """Return a 3x3 rotation matrix for rotating around ``axis``."""
     axis = axis / np.linalg.norm(axis)
     c, s = np.cos(angle), np.sin(angle)
     t = 1.0 - c
@@ -612,7 +688,7 @@ def _rotation_matrix_xyz(
     y_degrees: float,
     z_degrees: float,
 ) -> np.ndarray:
-    """Return the XYZ Euler rotation matrix used by the JS viewer."""
+    """Return the XYZ Euler rotation matrix used by the desktop viewer."""
     x_radians, y_radians, z_radians = np.radians(
         [x_degrees, y_degrees, z_degrees]
     )
@@ -628,6 +704,7 @@ def desktop_viewer(
     render_fn: Callable[[CameraState], Any],
     *,
     state: ViewerState | None = None,
+    controls: DesktopPydanticControls[Any] | None = None,
     width: int = 1280,
     height: int = 720,
     title: str = "marimo-3dv desktop viewer",
@@ -636,6 +713,7 @@ def desktop_viewer(
     return DesktopViewer(
         render_fn,
         state=state,
+        controls=controls,
         width=width,
         height=height,
         title=title,

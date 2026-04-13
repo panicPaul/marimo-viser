@@ -11,7 +11,7 @@ import torch
 from marimo._runtime.virtual_file import InMemoryStorage, VirtualFileRegistry
 from pydantic import BaseModel
 
-import marimo_3dv.gui.pydantic as pgui
+import marimo_3dv.viewer.defaults as viewer_defaults
 from marimo_3dv import (
     CameraState,
     ViewerClick,
@@ -22,9 +22,12 @@ from marimo_3dv import (
     apply_viewer_pipeline_config,
     viewer_controls_config,
     viewer_controls_gui,
+    viewer_controls_handle,
     viewer_pipeline_controls_gui,
+    viewer_pipeline_controls_handle,
 )
 from marimo_3dv.gui.pydantic import PydanticGui
+from marimo_3dv.viewer.controls import DesktopPydanticControls
 from marimo_3dv.viewer.widget import (
     _convert_cam_to_world_between_conventions,
     _FrameStreamServer,
@@ -74,13 +77,13 @@ def test_default_camera_state_uses_proper_rotation_matrix() -> None:
     assert np.allclose(rotation[:, 1], np.array([0.0, 1.0, 0.0]))
 
 
-def test_viewer_state_defaults_show_axes_and_hides_guides() -> None:
+def test_viewer_state_defaults_show_axes_and_stats() -> None:
     state = ViewerState()
 
     assert state.show_axes is True
     assert state.show_horizon is False
     assert state.show_origin is False
-    assert state.show_stats is False
+    assert state.show_stats is True
 
 
 def test_viewer_state_overlay_setters_are_fluent() -> None:
@@ -205,7 +208,7 @@ def test_set_fov_degrees_can_skip_live_viewer_callback() -> None:
 def test_viewer_controls_gui_builds_live_form(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(pgui.mo, "running_in_notebook", lambda: True)
+    monkeypatch.setattr(viewer_defaults.mo, "running_in_notebook", lambda: True)
 
     handle = viewer_controls_gui(ViewerState())
 
@@ -213,10 +216,24 @@ def test_viewer_controls_gui_builds_live_form(
     assert isinstance(handle.gui, PydanticGui)
 
 
+def test_viewer_controls_handle_uses_desktop_controls_outside_notebook(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        viewer_defaults.mo, "running_in_notebook", lambda: False
+    )
+
+    handle = viewer_controls_handle(ViewerState())
+
+    assert handle.config_model is ViewerControlsConfig
+    assert isinstance(handle.gui, DesktopPydanticControls)
+    assert handle.value == handle.default_config
+
+
 def test_combined_viewer_pipeline_controls_gui_builds_live_form(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(pgui.mo, "running_in_notebook", lambda: True)
+    monkeypatch.setattr(viewer_defaults.mo, "running_in_notebook", lambda: True)
 
     pipeline = ViewerPipeline(view_factory=lambda scene: scene)
     pipeline_result = pipeline.build(
@@ -228,6 +245,26 @@ def test_combined_viewer_pipeline_controls_gui_builds_live_form(
     assert "viewer" in handle.config_model.model_fields
     assert "pipeline" in handle.config_model.model_fields
     assert isinstance(handle.gui, PydanticGui)
+
+
+def test_combined_viewer_pipeline_controls_handle_uses_desktop_controls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        viewer_defaults.mo, "running_in_notebook", lambda: False
+    )
+
+    pipeline = ViewerPipeline(view_factory=lambda scene: scene)
+    pipeline_result = pipeline.build(
+        source_scene=None, viewer_state=ViewerState()
+    )
+
+    handle = viewer_pipeline_controls_handle(ViewerState(), pipeline_result)
+
+    assert "viewer" in handle.config_model.model_fields
+    assert "pipeline" in handle.config_model.model_fields
+    assert isinstance(handle.gui, DesktopPydanticControls)
+    assert handle.value == handle.default_config
 
 
 def test_apply_viewer_pipeline_config_returns_pipeline_subtree() -> None:

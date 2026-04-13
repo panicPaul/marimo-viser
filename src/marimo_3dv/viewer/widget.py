@@ -627,7 +627,7 @@ class ViewerState:
         show_axes: bool = True,
         show_horizon: bool = False,
         show_origin: bool = False,
-        show_stats: bool = False,
+        show_stats: bool = True,
         keyboard_move_speed: float = 0.125,
         keyboard_sprint_multiplier: float = 4.0,
     ) -> None:
@@ -1191,7 +1191,7 @@ class _NativeViewerAnyWidget(anywidget.AnyWidget):
     show_axes = traitlets.Bool(False).tag(sync=True)
     show_horizon = traitlets.Bool(False).tag(sync=True)
     show_origin = traitlets.Bool(False).tag(sync=True)
-    show_stats = traitlets.Bool(False).tag(sync=True)
+    show_stats = traitlets.Bool(True).tag(sync=True)
     viewer_rotation_x_degrees = traitlets.Float(0.0).tag(sync=True)
     viewer_rotation_y_degrees = traitlets.Float(0.0).tag(sync=True)
     viewer_rotation_z_degrees = traitlets.Float(0.0).tag(sync=True)

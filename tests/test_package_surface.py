@@ -28,7 +28,9 @@ def test_core_imports_work():
         splat_load_form,
         viewer_controls_config,
         viewer_controls_gui,
+        viewer_controls_handle,
         viewer_pipeline_controls_gui,
+        viewer_pipeline_controls_handle,
     )
 
     assert CameraState is not None
@@ -53,7 +55,9 @@ def test_core_imports_work():
     assert pick_splat_load_config is not None
     assert splat_load_form is not None
     assert viewer_controls_config is not None
+    assert viewer_controls_handle is not None
     assert viewer_controls_gui is not None
+    assert viewer_pipeline_controls_handle is not None
     assert viewer_pipeline_controls_gui is not None
 
 
@@ -92,7 +96,9 @@ def test_viewer_runs_desktop_backend_outside_notebook(
     monkeypatch.setattr(
         viewer_module,
         "desktop_viewer",
-        lambda render_fn, state=None, width=1280, height=720, title="": stub,
+        lambda render_fn, state=None, controls=None, width=1280, height=720, title="": (
+            stub
+        ),
     )
 
     viewer = viewer_module.Viewer(lambda camera: camera)

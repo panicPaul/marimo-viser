@@ -189,30 +189,32 @@ def _(backend_bundle, pipeline_result, viewer_state):
     )
     viewer_controls_gui = viewer_controls.gui
     viewer_controls_default_config = viewer_controls.default_config
-    return viewer_controls_default_config, viewer_controls_gui
+    return (viewer_controls_gui,)
 
 
 @app.cell
-def _(
-    pipeline_result,
-    viewer_controls_default_config,
-    viewer_controls_gui,
-    viewer_state,
-):
-    combined_config = (
-        viewer_controls_gui.value or viewer_controls_default_config
-    )
-    pipeline_config = apply_viewer_pipeline_config(
-        viewer_state,
-        combined_config,
-    )
-    render_fn = pipeline_result.bind(
-        pipeline_config,
-        backend_fn=rasterize_scene,
-    )
+def _(pipeline_result, viewer_controls_gui, viewer_state):
+    cache = {"config_json": None, "render_fn": None}
+
+    def render_frame(camera_state):
+        combined_config = viewer_controls_gui.value
+        config_json = combined_config.model_dump_json()
+        if cache["render_fn"] is None or config_json != cache["config_json"]:
+            pipeline_config = apply_viewer_pipeline_config(
+                viewer_state,
+                combined_config,
+            )
+            cache["render_fn"] = pipeline_result.bind(
+                pipeline_config,
+                backend_fn=rasterize_scene,
+            )
+            cache["config_json"] = config_json
+        return cache["render_fn"](camera_state).image
+
     viewer = Viewer(
-        lambda camera_state: render_fn(camera_state).image,
+        render_frame,
         state=viewer_state,
+        controls=viewer_controls_gui,
     )
     return (viewer,)
 

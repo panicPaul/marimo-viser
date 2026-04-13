@@ -23,6 +23,7 @@ __generated_with = "0.23.0"
 app = marimo.App(width="medium")
 
 with app.setup:
+    import gc
     from dataclasses import dataclass
     from math import isqrt
     from pathlib import Path
@@ -100,7 +101,7 @@ def _():
 
     gui_pipeline = (
         GuiPipeline(
-            allow_prepared_copy=True,
+            allow_prepared_copy=False,
             prepare_copy_fn=_prepare_splat_render_data,
         )
         # .pipe(max_sh_degree_op())
@@ -238,12 +239,28 @@ def _():
 
 @app.cell
 def _():
+    class GpuLoadOptions(BaseModel):
+        """Notebook-only controls for scene replacement behavior."""
+
+        close_existing_viewer: bool = Field(
+            default=True,
+            description="Close the active viewer before loading a new scene.",
+        )
+        empty_cuda_cache: bool = Field(
+            default=True,
+            description="Release unused CUDA allocator cache before reload.",
+        )
+
     class LoadConfig(BaseModel):
         """Configuration for loading a PLY file."""
 
         ply_path: Path = Field(
             default=Path.cwd() / "point_cloud.ply",
             description="Path to a 3DGS-style `.ply` file.",
+        )
+        gpu: GpuLoadOptions = Field(
+            default_factory=GpuLoadOptions,
+            description="How to clean up GPU resources before replacing a scene.",
         )
 
     load_form = form_gui(
@@ -252,14 +269,117 @@ def _():
     return (load_form,)
 
 
+@app.function
+def format_num_bytes(num_bytes: int) -> str:
+    """Format a byte count in GiB with two decimals."""
+    gib = num_bytes / (1024**3)
+    return f"{gib:.2f} GiB"
+
+
+@app.function
+def cuda_memory_snapshot() -> dict[str, int | bool]:
+    """Return a lightweight snapshot of current CUDA allocator state."""
+    if not torch.cuda.is_available():
+        return {
+            "available": False,
+            "allocated_bytes": 0,
+            "reserved_bytes": 0,
+            "max_allocated_bytes": 0,
+            "max_reserved_bytes": 0,
+        }
+
+    return {
+        "available": True,
+        "allocated_bytes": int(torch.cuda.memory_allocated()),
+        "reserved_bytes": int(torch.cuda.memory_reserved()),
+        "max_allocated_bytes": int(torch.cuda.max_memory_allocated()),
+        "max_reserved_bytes": int(torch.cuda.max_memory_reserved()),
+    }
+
+
+@app.function
+def format_cuda_memory_report(
+    before_cleanup: dict[str, int | bool],
+    after_cleanup: dict[str, int | bool],
+    after_load: dict[str, int | bool],
+) -> str:
+    """Render a markdown report for the latest scene-replacement cycle."""
+    if not bool(after_load["available"]):
+        return "CUDA is unavailable."
+
+    lines = [
+        "| Phase | Allocated | Reserved | Peak Allocated | Peak Reserved |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for label, snapshot in (
+        ("Before Cleanup", before_cleanup),
+        ("After Cleanup", after_cleanup),
+        ("After Load", after_load),
+    ):
+        lines.append(
+            "| "
+            f"{label} | "
+            f"{format_num_bytes(int(snapshot['allocated_bytes']))} | "
+            f"{format_num_bytes(int(snapshot['reserved_bytes']))} | "
+            f"{format_num_bytes(int(snapshot['max_allocated_bytes']))} | "
+            f"{format_num_bytes(int(snapshot['max_reserved_bytes']))} |"
+        )
+    return "\n".join(lines)
+
+
+@app.function
+def cleanup_before_scene_reload(
+    viewer_state: ViewerState,
+    *,
+    close_existing_viewer: bool,
+    empty_cuda_cache: bool,
+) -> tuple[dict[str, int | bool], dict[str, int | bool]]:
+    """Tear down viewer-owned resources before replacing the scene."""
+    before_cleanup = cuda_memory_snapshot()
+
+    if close_existing_viewer:
+        active_ref = viewer_state._active_marimo_viewer_ref
+        active_viewer = None if active_ref is None else active_ref()
+        if active_viewer is not None:
+            active_viewer.close()
+
+    gc.collect()
+
+    if torch.cuda.is_available() and empty_cuda_cache:
+        torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
+
+    after_cleanup = cuda_memory_snapshot()
+    return before_cleanup, after_cleanup
+
+
 @app.cell
-def _(load_form):
+def _(load_form, viewer_state):
     if mo.running_in_notebook():
         load_config = load_form.value
+        before_cleanup, after_cleanup = cleanup_before_scene_reload(
+            viewer_state,
+            close_existing_viewer=(
+                load_config.gpu.close_existing_viewer
+                if load_config is not None
+                else True
+            ),
+            empty_cuda_cache=(
+                load_config.gpu.empty_cuda_cache
+                if load_config is not None
+                else True
+            ),
+        )
         scene = (
             load_splat_scene(load_config.ply_path)
             if load_config is not None and load_config.ply_path.exists()
             else None
+        )
+        after_load = cuda_memory_snapshot()
+        load_report = format_cuda_memory_report(
+            before_cleanup,
+            after_cleanup,
+            after_load,
         )
     else:
         import subprocess
@@ -276,7 +396,23 @@ def _(load_form):
         )
         ply_path = Path(result.stdout.strip())
         scene = load_splat_scene(ply_path) if ply_path.exists() else None
-    return (scene,)
+        snapshot = cuda_memory_snapshot()
+        load_report = format_cuda_memory_report(
+            snapshot,
+            snapshot,
+            snapshot,
+        )
+    return load_report, scene
+
+
+@app.cell
+def _(load_report):
+    mo.md(f"""
+    ## CUDA Memory
+
+    {load_report}
+    """)
+    return
 
 
 @app.cell(hide_code=True)

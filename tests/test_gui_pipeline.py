@@ -5,6 +5,8 @@ from dataclasses import dataclass
 import numpy as np
 from pydantic import BaseModel
 
+from marimo_3dv.ops.gs import gs_backend_bundle
+from marimo_3dv.pipeline.bundle import ViewerBackendBundle, backend_bundle
 from marimo_3dv.pipeline.context import ViewerContext
 from marimo_3dv.pipeline.gui import (
     AbstractRenderView,
@@ -47,6 +49,60 @@ def test_empty_pipeline_builds() -> None:
     pipeline = ViewerPipeline(view_factory=_view_factory)
     result = pipeline.build(source_scene=[], viewer_state=_make_viewer_state())
     assert result is not None
+
+
+def test_backend_bundle_builds_pipeline_with_default_items() -> None:
+    render_item = render_node(
+        name="append",
+        apply=lambda view, config, context: view.with_token("x"),
+    )
+    bundle = backend_bundle(
+        name="list",
+        render_view_factory=_view_factory,
+        compile_view=lambda view: view,
+        default_render_items=(PipelineGroup("defaults", render_item),),
+    )
+
+    result = bundle.pipeline().build(
+        source_scene=[],
+        viewer_state=_make_viewer_state(),
+    )
+
+    def backend(camera_state, compiled_view: _ListRenderView) -> RenderResult:
+        del camera_state
+        return RenderResult(
+            image=_dummy_image(),
+            metadata={"tokens": compiled_view.tokens},
+        )
+
+    from marimo_3dv.viewer.widget import CameraState
+
+    render_fn = result.bind(result.default_config, backend_fn=backend)
+    output = render_fn(CameraState.default())
+    assert output.metadata["tokens"] == ("x",)
+
+
+def test_backend_bundle_exposes_viewer_controls_defaults() -> None:
+    def _transform(config):
+        return config.model_copy(update={"show_stats": True})
+
+    bundle = backend_bundle(
+        name="list",
+        render_view_factory=_view_factory,
+        compile_view=lambda view: view,
+        viewer_controls_transform=_transform,
+    )
+
+    config = bundle.viewer_controls(_make_viewer_state())
+
+    assert config.show_stats is True
+
+
+def test_gs_backend_bundle_returns_pipeline_bundle() -> None:
+    bundle = gs_backend_bundle()
+
+    assert isinstance(bundle, ViewerBackendBundle)
+    assert bundle.name == "gsplat"
 
 
 def test_nested_group_config_is_exposed() -> None:

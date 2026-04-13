@@ -8,15 +8,33 @@ def test_core_imports_work():
         CameraState,
         MarimoViewer,
         Viewer,
+        ViewerBackendBundle,
         ViewerClick,
+        ViewerControlsConfig,
         ViewerState,
+        apply_viewer_config,
+        apply_viewer_pipeline_config,
+        backend_bundle,
+        gs_backend_bundle,
+        viewer_controls_config,
+        viewer_controls_gui,
+        viewer_pipeline_controls_gui,
     )
 
     assert CameraState is not None
     assert MarimoViewer is not None
     assert Viewer is not None
+    assert ViewerBackendBundle is not None
     assert ViewerClick is not None
+    assert ViewerControlsConfig is not None
     assert ViewerState is not None
+    assert apply_viewer_config is not None
+    assert apply_viewer_pipeline_config is not None
+    assert backend_bundle is not None
+    assert gs_backend_bundle is not None
+    assert viewer_controls_config is not None
+    assert viewer_controls_gui is not None
+    assert viewer_pipeline_controls_gui is not None
 
 
 def test_viewer_uses_marimo_backend_in_notebook_runtime(

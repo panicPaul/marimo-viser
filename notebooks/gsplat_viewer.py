@@ -19,7 +19,7 @@
 
 import marimo
 
-__generated_with = "0.23.1"
+__generated_with = "0.23.0"
 app = marimo.App(width="medium")
 
 with app.setup:
@@ -27,7 +27,6 @@ with app.setup:
     from dataclasses import dataclass
     from math import isqrt
     from pathlib import Path
-    from typing import Literal
 
     import marimo as mo
     import numpy as np
@@ -40,18 +39,13 @@ with app.setup:
 
     from marimo_3dv import (
         CameraState,
-        PipelineGroup,
         RenderResult,
         Viewer,
-        ViewerPipeline,
         ViewerState,
-        compile_gs_render_view,
-        filter_opacity_op,
-        filter_size_op,
+        apply_viewer_pipeline_config,
         form_gui,
-        gs_render_view,
-        max_sh_degree_op,
-        show_distribution_op,
+        gs_backend_bundle,
+        viewer_pipeline_controls_gui,
     )
 
 
@@ -101,32 +95,9 @@ def _(viewer_state):
 
 @app.cell
 def _():
-    viewer_pipeline = (
-        ViewerPipeline(
-            view_factory=gs_render_view,
-            compile_view=compile_gs_render_view,
-        )
-        .render(
-            PipelineGroup(
-                "shading",
-                max_sh_degree_op(),
-            )
-        )
-        .render(
-            PipelineGroup(
-                "filtering",
-                filter_opacity_op(),
-                filter_size_op(),
-            )
-        )
-        .effect(
-            PipelineGroup(
-                "diagnostics",
-                show_distribution_op(),
-            )
-        )
-    )
-    return (viewer_pipeline,)
+    backend_bundle = gs_backend_bundle()
+    viewer_pipeline = backend_bundle.pipeline()
+    return backend_bundle, viewer_pipeline
 
 
 @app.cell
@@ -136,78 +107,16 @@ def _(scene, viewer_pipeline, viewer_state):
 
 
 @app.cell
-def _(pipeline_result, viewer_state):
-    class ViewerOrigin(BaseModel):
-        """Viewer origin marker position."""
-
-        x: float = Field(default=viewer_state.origin[0])
-        y: float = Field(default=viewer_state.origin[1])
-        z: float = Field(default=viewer_state.origin[2])
-
-    class ViewerRotation(BaseModel):
-        """Viewer-frame rotation in degrees."""
-
-        x_degrees: float = Field(
-            default=viewer_state.viewer_rotation_x_degrees,
-            ge=-180.0,
-            le=180.0,
-        )
-        y_degrees: float = Field(
-            default=viewer_state.viewer_rotation_y_degrees,
-            ge=-180.0,
-            le=180.0,
-        )
-        z_degrees: float = Field(
-            default=viewer_state.viewer_rotation_z_degrees,
-            ge=-180.0,
-            le=180.0,
-        )
-
-    class ViewerOptions(BaseModel):
-        """Viewer controls shown alongside pipeline controls."""
-
-        show_axes: bool = Field(default=viewer_state.show_axes)
-        show_horizon: bool = Field(default=viewer_state.show_horizon)
-        show_origin: bool = Field(default=viewer_state.show_origin)
-        show_stats: bool = Field(default=viewer_state.show_stats)
-        interactive_quality: int = Field(
-            default=viewer_state.interactive_quality,
-            ge=1,
-            le=100,
-        )
-        settled_quality: Literal["jpeg_95", "jpeg_100", "png"] = Field(
-            default=viewer_state.settled_quality
-        )
-        interactive_max_side: int = Field(
-            default=viewer_state.interactive_max_side or 1980,
-            ge=1,
-        )
-        internal_render_max_side: int = Field(
-            default=viewer_state.internal_render_max_side or 3840,
-            ge=1,
-        )
-        rotation: ViewerRotation = Field(default_factory=ViewerRotation)
-        origin: ViewerOrigin = Field(default_factory=ViewerOrigin)
-
-    class ViewerNotebookConfig(BaseModel):
-        """Combined viewer and pipeline config."""
-
-        viewer: ViewerOptions = Field(default_factory=ViewerOptions)
-        pipeline: pipeline_result.config_model = Field(
-            default_factory=lambda: pipeline_result.default_config
-        )
-
-    pipeline_config_gui = form_gui(
-        ViewerNotebookConfig,
-        value=ViewerNotebookConfig(),
-        live_update=True,
+def _(backend_bundle, pipeline_result, viewer_state):
+    viewer_controls = viewer_pipeline_controls_gui(
+        viewer_state,
+        pipeline_result,
+        viewer_default_config=backend_bundle.viewer_controls(viewer_state),
     )
-    reset_view_button = mo.ui.button(
-        label="Reset View",
-        on_click=lambda _value: viewer_state.reset_camera(),
-    )
-    mo.vstack([reset_view_button, pipeline_config_gui])
-    return ViewerNotebookConfig, pipeline_config_gui, reset_view_button
+    viewer_controls_gui = viewer_controls.gui
+    viewer_controls_default_config = viewer_controls.default_config
+    viewer_controls_gui
+    return viewer_controls_default_config, viewer_controls_gui
 
 
 @app.cell
@@ -218,37 +127,19 @@ def _(viewer):
 
 @app.cell
 def _(
-    ViewerNotebookConfig,
-    pipeline_config_gui,
     pipeline_result,
+    viewer_controls_default_config,
+    viewer_controls_gui,
     viewer_state,
 ):
-    notebook_config = pipeline_config_gui.value or ViewerNotebookConfig()
-    viewer_config = notebook_config.viewer
-    viewer_state.interactive_quality = viewer_config.interactive_quality
-    viewer_state.settled_quality = viewer_config.settled_quality  # type: ignore[assignment]
-    viewer_state.interactive_max_side = viewer_config.interactive_max_side
-    viewer_state.internal_render_max_side = (
-        viewer_config.internal_render_max_side
+    combined_config = (
+        viewer_controls_gui.value or viewer_controls_default_config
     )
-    (
-        viewer_state.set_show_axes(viewer_config.show_axes)
-        .set_show_horizon(viewer_config.show_horizon)
-        .set_show_origin(viewer_config.show_origin)
-        .set_show_stats(viewer_config.show_stats)
-        .set_viewer_rotation(
-            viewer_config.rotation.x_degrees,
-            viewer_config.rotation.y_degrees,
-            viewer_config.rotation.z_degrees,
-        )
-        .set_origin(
-            viewer_config.origin.x,
-            viewer_config.origin.y,
-            viewer_config.origin.z,
-        )
+    pipeline_config = apply_viewer_pipeline_config(
+        viewer_state, combined_config
     )
     render_fn = pipeline_result.bind(
-        notebook_config.pipeline,
+        pipeline_config,
         backend_fn=rasterize_scene,
     )
     viewer = Viewer(

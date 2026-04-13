@@ -7,6 +7,18 @@ from typing import Any
 
 import marimo as mo
 
+from marimo_3dv.viewer.defaults import (
+    CombinedViewerPipelineControlsHandle,
+    ViewerControlsConfig,
+    ViewerControlsHandle,
+    ViewerOriginConfig,
+    ViewerRotationConfig,
+    apply_viewer_config,
+    apply_viewer_pipeline_config,
+    viewer_controls_config,
+    viewer_controls_gui,
+    viewer_pipeline_controls_gui,
+)
 from marimo_3dv.viewer.desktop import DesktopViewer, desktop_viewer
 from marimo_3dv.viewer.widget import (
     CameraState,
@@ -48,8 +60,18 @@ def Viewer(
 
 __all__ = [
     "CameraState",
+    "CombinedViewerPipelineControlsHandle",
     "MarimoViewer",
     "Viewer",
     "ViewerClick",
+    "ViewerControlsConfig",
+    "ViewerControlsHandle",
+    "ViewerOriginConfig",
+    "ViewerRotationConfig",
     "ViewerState",
+    "apply_viewer_config",
+    "apply_viewer_pipeline_config",
+    "viewer_controls_config",
+    "viewer_controls_gui",
+    "viewer_pipeline_controls_gui",
 ]

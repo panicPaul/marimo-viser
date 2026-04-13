@@ -9,12 +9,22 @@ import numpy as np
 import pytest
 import torch
 from marimo._runtime.virtual_file import InMemoryStorage, VirtualFileRegistry
+from pydantic import BaseModel
 
+import marimo_3dv.gui.pydantic as pgui
 from marimo_3dv import (
     CameraState,
     ViewerClick,
+    ViewerControlsConfig,
+    ViewerPipeline,
     ViewerState,
+    apply_viewer_config,
+    apply_viewer_pipeline_config,
+    viewer_controls_config,
+    viewer_controls_gui,
+    viewer_pipeline_controls_gui,
 )
+from marimo_3dv.gui.pydantic import PydanticGui
 from marimo_3dv.viewer.widget import (
     _convert_cam_to_world_between_conventions,
     _FrameStreamServer,
@@ -90,6 +100,145 @@ def test_viewer_state_overlay_setters_are_fluent() -> None:
     assert state.show_horizon is True
     assert state.show_stats is True
     assert state.origin == (1.0, 2.0, 3.0)
+
+
+def test_viewer_controls_config_reflects_viewer_state() -> None:
+    state = ViewerState(
+        camera_state=CameraState.default(fov_degrees=75.0),
+        interactive_quality=70,
+        settled_quality="png",
+        internal_render_max_side=2048,
+        interactive_max_side=1024,
+        show_axes=False,
+        show_horizon=True,
+        show_origin=True,
+        show_stats=True,
+    )
+    state.set_viewer_rotation(10.0, 20.0, 30.0).set_origin(1.0, 2.0, 3.0)
+
+    config = viewer_controls_config(state)
+
+    assert config.fov_degrees == 75.0
+    assert config.show_axes is False
+    assert config.show_horizon is True
+    assert config.show_origin is True
+    assert config.show_stats is True
+    assert config.interactive_quality == 70
+    assert config.settled_quality == "png"
+    assert config.interactive_max_side == 1024
+    assert config.internal_render_max_side == 2048
+    assert config.rotation.x_degrees == 10.0
+    assert config.rotation.y_degrees == 20.0
+    assert config.rotation.z_degrees == 30.0
+    assert config.origin.x == 1.0
+    assert config.origin.y == 2.0
+    assert config.origin.z == 3.0
+
+
+def test_apply_viewer_config_updates_viewer_state() -> None:
+    state = ViewerState()
+    config = ViewerControlsConfig(
+        fov_degrees=72.0,
+        show_axes=False,
+        show_horizon=True,
+        show_origin=True,
+        show_stats=True,
+        interactive_quality=80,
+        settled_quality="png",
+        interactive_max_side=900,
+        internal_render_max_side=1800,
+        rotation={"x_degrees": 15.0, "y_degrees": -25.0, "z_degrees": 45.0},
+        origin={"x": 4.0, "y": 5.0, "z": 6.0},
+    )
+
+    returned = apply_viewer_config(state, config)
+
+    assert returned is state
+    assert state.camera_state.fov_degrees == 72.0
+    assert state.initial_camera_state.fov_degrees == 72.0
+    assert state.show_axes is False
+    assert state.show_horizon is True
+    assert state.show_origin is True
+    assert state.show_stats is True
+    assert state.interactive_quality == 80
+    assert state.settled_quality == "png"
+    assert state.interactive_max_side == 900
+    assert state.internal_render_max_side == 1800
+    assert state.viewer_rotation_x_degrees == 15.0
+    assert state.viewer_rotation_y_degrees == -25.0
+    assert state.viewer_rotation_z_degrees == 45.0
+    assert state.origin == (4.0, 5.0, 6.0)
+
+
+def test_set_fov_degrees_can_skip_live_viewer_callback() -> None:
+    state = ViewerState()
+    callback_fov: list[float] = []
+
+    def _capture(camera_state: CameraState) -> None:
+        callback_fov.append(camera_state.fov_degrees)
+
+    state._reset_camera_callback = _capture
+
+    returned = state.set_fov_degrees(72.0, push_to_viewer=False)
+
+    assert returned is state
+    assert state.camera_state.fov_degrees == 72.0
+    assert state.initial_camera_state.fov_degrees == 72.0
+    assert callback_fov == []
+
+
+def test_viewer_controls_gui_builds_live_form(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(pgui.mo, "running_in_notebook", lambda: True)
+
+    handle = viewer_controls_gui(ViewerState())
+
+    assert handle.config_model is ViewerControlsConfig
+    assert isinstance(handle.gui, PydanticGui)
+
+
+def test_combined_viewer_pipeline_controls_gui_builds_live_form(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(pgui.mo, "running_in_notebook", lambda: True)
+
+    pipeline = ViewerPipeline(view_factory=lambda scene: scene)
+    pipeline_result = pipeline.build(
+        source_scene=None, viewer_state=ViewerState()
+    )
+
+    handle = viewer_pipeline_controls_gui(ViewerState(), pipeline_result)
+
+    assert "viewer" in handle.config_model.model_fields
+    assert "pipeline" in handle.config_model.model_fields
+    assert isinstance(handle.gui, PydanticGui)
+
+
+def test_apply_viewer_pipeline_config_returns_pipeline_subtree() -> None:
+    class _PipelineConfig(BaseModel):
+        value: int = 3
+
+    class _CombinedConfig(BaseModel):
+        viewer: ViewerControlsConfig = ViewerControlsConfig()
+        pipeline: _PipelineConfig = _PipelineConfig()
+
+    state = ViewerState()
+    config = _CombinedConfig(
+        viewer=ViewerControlsConfig(
+            fov_degrees=68.0,
+            show_axes=False,
+            rotation={"x_degrees": 5.0, "y_degrees": 0.0, "z_degrees": 0.0},
+        ),
+        pipeline=_PipelineConfig(value=9),
+    )
+
+    pipeline_config = apply_viewer_pipeline_config(state, config)
+
+    assert pipeline_config.value == 9
+    assert state.camera_state.fov_degrees == 68.0
+    assert state.show_axes is False
+    assert state.viewer_rotation_x_degrees == 5.0
 
 
 def test_camera_state_with_convention_round_trips() -> None:

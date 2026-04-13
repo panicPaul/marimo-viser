@@ -9,10 +9,12 @@ import numpy as np
 import torch
 from pydantic import BaseModel, Field
 
+from marimo_3dv.pipeline.bundle import ViewerBackendBundle, backend_bundle
 from marimo_3dv.pipeline.context import ViewerContext
 from marimo_3dv.pipeline.gui import (
     AbstractRenderView,
     EffectNode,
+    PipelineGroup,
     RenderNode,
     RenderResult,
     effect_node,
@@ -344,6 +346,28 @@ def show_distribution_op() -> EffectNode[CompiledGsRenderView, None]:
     )
 
 
+def gs_backend_bundle() -> ViewerBackendBundle[
+    SplatRenderData | None, GsRenderView, CompiledGsRenderView | None
+]:
+    """Return a lightweight GS backend bundle with optional default groups."""
+    return backend_bundle(
+        name="gsplat",
+        render_view_factory=gs_render_view,
+        compile_view=compile_gs_render_view,
+        default_render_items=(
+            PipelineGroup("shading", max_sh_degree_op()),
+            PipelineGroup(
+                "filtering",
+                filter_opacity_op(),
+                filter_size_op(),
+            ),
+        ),
+        default_effect_items=(
+            PipelineGroup("diagnostics", show_distribution_op()),
+        ),
+    )
+
+
 __all__ = [
     "CompiledGsRenderView",
     "FilterOpacityConfig",
@@ -355,6 +379,7 @@ __all__ = [
     "compile_gs_render_view",
     "filter_opacity_op",
     "filter_size_op",
+    "gs_backend_bundle",
     "gs_render_view",
     "max_sh_degree_op",
     "show_distribution_op",

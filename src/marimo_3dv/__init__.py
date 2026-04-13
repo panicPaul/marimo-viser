@@ -12,6 +12,7 @@ from marimo_3dv.ops.gs import (
     compile_gs_render_view,
     filter_opacity_op,
     filter_size_op,
+    gs_backend_bundle,
     gs_render_view,
     max_sh_degree_op,
     show_distribution_op,
@@ -28,6 +29,7 @@ from marimo_3dv.ops.normalization import (
 )
 from marimo_3dv.ops.overlay import PaintRayConfig, paint_ray_op
 from marimo_3dv.ops.setup import camera_similarity_op, pca_alignment_op
+from marimo_3dv.pipeline.bundle import ViewerBackendBundle, backend_bundle
 from marimo_3dv.pipeline.context import ViewerContext
 from marimo_3dv.pipeline.gui import (
     AbstractRenderView,
@@ -44,15 +46,26 @@ from marimo_3dv.pipeline.gui import (
 from marimo_3dv.pipeline.setup import SetupPipeline
 from marimo_3dv.viewer import (
     CameraState,
+    CombinedViewerPipelineControlsHandle,
     MarimoViewer,
     Viewer,
     ViewerClick,
+    ViewerControlsConfig,
+    ViewerControlsHandle,
+    ViewerOriginConfig,
+    ViewerRotationConfig,
     ViewerState,
+    apply_viewer_config,
+    apply_viewer_pipeline_config,
+    viewer_controls_config,
+    viewer_controls_gui,
+    viewer_pipeline_controls_gui,
 )
 
 __all__ = [
     "AbstractRenderView",
     "CameraState",
+    "CombinedViewerPipelineControlsHandle",
     "CompiledGsRenderView",
     "EffectNode",
     "EmptyConfig",
@@ -69,16 +82,24 @@ __all__ = [
     "ShowDistributionConfig",
     "SplatRenderData",
     "Viewer",
+    "ViewerBackendBundle",
     "ViewerClick",
     "ViewerContext",
+    "ViewerControlsConfig",
+    "ViewerControlsHandle",
+    "ViewerOriginConfig",
     "ViewerPipeline",
     "ViewerPipelineResult",
+    "ViewerRotationConfig",
     "ViewerState",
     "apply_rotation_to_quaternions",
     "apply_rotation_to_sh_coefficients",
     "apply_scale_to_log_scales",
     "apply_to_cameras",
     "apply_to_points",
+    "apply_viewer_config",
+    "apply_viewer_pipeline_config",
+    "backend_bundle",
     "camera_similarity_op",
     "compile_gs_render_view",
     "compose_transforms",
@@ -86,6 +107,7 @@ __all__ = [
     "filter_opacity_op",
     "filter_size_op",
     "form_gui",
+    "gs_backend_bundle",
     "gs_render_view",
     "json_gui",
     "max_sh_degree_op",
@@ -95,4 +117,7 @@ __all__ = [
     "render_node",
     "show_distribution_op",
     "similarity_from_cameras",
+    "viewer_controls_config",
+    "viewer_controls_gui",
+    "viewer_pipeline_controls_gui",
 ]

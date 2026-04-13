@@ -696,6 +696,34 @@ class ViewerState:
             self._reset_camera_callback(self.camera_state)
         return self
 
+    def set_fov_degrees(
+        self,
+        fov_degrees: float,
+        *,
+        push_to_viewer: bool = True,
+    ) -> ViewerState:
+        """Set the field of view on the current and initial camera state."""
+        current_camera = CameraState(
+            fov_degrees=fov_degrees,
+            width=self.camera_state.width,
+            height=self.camera_state.height,
+            cam_to_world=self.camera_state.cam_to_world,
+            camera_convention=self.camera_state.camera_convention,
+        )
+        initial_camera = CameraState(
+            fov_degrees=fov_degrees,
+            width=self.initial_camera_state.width,
+            height=self.initial_camera_state.height,
+            cam_to_world=self.initial_camera_state.cam_to_world,
+            camera_convention=self.initial_camera_state.camera_convention,
+        )
+        self.initial_camera_state = initial_camera
+        if push_to_viewer:
+            return self.set_camera(current_camera)
+        self.camera_state = current_camera
+        self.camera_convention = current_camera.camera_convention
+        return self
+
     def set_viewer_rotation(
         self,
         x_degrees: float,

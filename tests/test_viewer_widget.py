@@ -7,6 +7,7 @@ from collections.abc import Callable
 import numpy as np
 import pytest
 import torch
+from marimo._runtime.virtual_file import InMemoryStorage, VirtualFileRegistry
 
 from marimo_3dv import (
     CameraState,
@@ -16,7 +17,9 @@ from marimo_3dv import (
 from marimo_3dv.viewer.widget import (
     _convert_cam_to_world_between_conventions,
     _LatestOnlyRenderer,
+    _NativeViewerAnyWidget,
     _normalize_frame,
+    _StableMarimoAnyWidget,
     marimo_viewer,
 )
 
@@ -198,6 +201,75 @@ def test_viewer_last_click_reads_synced_widget_state() -> None:
         click.camera_state.cam_to_world,
     )
     assert viewer.get_last_click().x == click.x
+
+
+def test_stable_anywidget_uses_virtual_file_js_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeContext:
+        def __init__(self) -> None:
+            self.virtual_files_supported = True
+            self.virtual_file_registry = VirtualFileRegistry(InMemoryStorage())
+
+    monkeypatch.setattr(
+        "marimo_3dv.viewer.widget.get_context",
+        lambda: _FakeContext(),
+    )
+
+    widget = _NativeViewerAnyWidget(
+        camera_state=CameraState.default(),
+        aspect_ratio=1.0,
+        show_axes=True,
+        show_horizon=False,
+        show_origin=False,
+        show_stats=False,
+        viewer_rotation_x_degrees=0.0,
+        viewer_rotation_y_degrees=0.0,
+        viewer_rotation_z_degrees=0.0,
+        origin_x=0.0,
+        origin_y=0.0,
+        origin_z=0.0,
+        stream_port=1,
+        stream_path="/stream",
+        stream_token="token",
+    )
+
+    wrapped = _StableMarimoAnyWidget(widget)
+
+    assert wrapped._args.args["js-url"].startswith("./@file/")
+
+
+def test_stable_anywidget_retries_on_virtual_file_name_collision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeRegistry:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def add(self, virtual_file: object, context: object) -> None:
+            del context
+            self.calls += 1
+            if self.calls == 1:
+                raise FileExistsError("collision")
+
+    class _FakeContext:
+        def __init__(self) -> None:
+            self.virtual_files_supported = True
+            self.virtual_file_registry = _FakeRegistry()
+
+    monkeypatch.setattr(
+        "marimo_3dv.viewer.widget.get_context",
+        lambda: _FakeContext(),
+    )
+
+    js_url = _StableMarimoAnyWidget._create_js_url(
+        js="export default {};",
+        js_filename="native_viewer_widget.js",
+        js_hash="abc123",
+    )
+
+    assert js_url.startswith("./@file/")
+    assert "abc123-" in js_url
 
 
 def test_viewer_get_snapshot_decodes_latest_frame() -> None:

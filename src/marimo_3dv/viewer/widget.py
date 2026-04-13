@@ -34,6 +34,7 @@ from marimo._plugins.ui._impl.from_anywidget import (
 from marimo._plugins.ui._impl.from_anywidget import (
     anywidget as BaseMarimoAnyWidget,
 )
+from marimo._runtime.context import ContextNotInitializedError, get_context
 from marimo._runtime.virtual_file import VirtualFile
 from marimo._utils.code import hash_code
 from PIL import Image
@@ -796,7 +797,7 @@ class _WidgetValueProxy(MutableMapping[str, object]):
 
 
 class _StableMarimoAnyWidget(BaseMarimoAnyWidget):
-    """Wrap an anywidget with a stable data URL instead of a temp file."""
+    """Wrap an anywidget with a stable virtual-file URL for marimo."""
 
     def __init__(self, widget: anywidget.AnyWidget) -> None:
         self.widget = widget
@@ -815,14 +816,10 @@ class _StableMarimoAnyWidget(BaseMarimoAnyWidget):
         js_hash = hash_code(js)
         _ = widget.comm
         model_id = get_anywidget_model_id(widget)
-        js_url = (
-            VirtualFile(
-                filename=js_filename,
-                buffer=js.encode("utf-8"),
-                as_data_url=True,
-            ).url
-            if js
-            else ""
+        js_url = self._create_js_url(
+            js=js,
+            js_filename=js_filename,
+            js_hash=js_hash,
         )
 
         UIElement.__init__(
@@ -837,6 +834,51 @@ class _StableMarimoAnyWidget(BaseMarimoAnyWidget):
             },
             on_change=None,
         )
+
+    @staticmethod
+    def _create_js_url(*, js: str, js_filename: str, js_hash: str) -> str:
+        """Create a JS URL that prefers marimo's virtual-file registry."""
+        if not js:
+            return ""
+
+        js_buffer = js.encode("utf-8")
+        suffix = Path(js_filename).suffix or ".js"
+        stem = Path(js_filename).stem
+        versioned_filename = f"{stem}-{js_hash}{suffix}"
+
+        try:
+            context = get_context()
+        except ContextNotInitializedError:
+            context = None
+
+        if context is None or not context.virtual_files_supported:
+            return VirtualFile(
+                filename=versioned_filename,
+                buffer=js_buffer,
+                as_data_url=True,
+            ).url
+
+        for attempt in range(4):
+            candidate_filename = versioned_filename
+            if attempt > 0:
+                candidate_filename = (
+                    f"{stem}-{js_hash}-{secrets.token_hex(4)}{suffix}"
+                )
+            virtual_file = VirtualFile(
+                filename=candidate_filename,
+                buffer=js_buffer,
+            )
+            try:
+                context.virtual_file_registry.add(virtual_file, context)
+            except FileExistsError:
+                continue
+            return virtual_file.url
+
+        return VirtualFile(
+            filename=f"{stem}-{js_hash}-{secrets.token_hex(8)}{suffix}",
+            buffer=js_buffer,
+            as_data_url=True,
+        ).url
 
     def _initialize(
         self,

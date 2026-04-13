@@ -25,7 +25,6 @@ from marimo_3dv.viewer.widget import (
 )
 
 _ORBIT_SENSITIVITY = 0.008
-_MOVE_SPEED = 0.05
 _SCROLL_ZOOM_SENSITIVITY = 0.0015
 _MIN_FOV = 5.0
 _MAX_FOV = 170.0
@@ -344,7 +343,9 @@ class DesktopViewer:
         if not keys:
             return
         position, right, up, forward = self._camera_axes()
-        speed = _MOVE_SPEED * dt * 60.0
+        speed = self._state.keyboard_move_speed * dt * 60.0
+        if pyglet.window.key.LSHIFT in keys or pyglet.window.key.RSHIFT in keys:
+            speed *= self._state.keyboard_sprint_multiplier
         delta = np.zeros(3)
         if pyglet.window.key.W in keys:
             delta += forward * speed

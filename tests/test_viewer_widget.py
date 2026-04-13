@@ -118,37 +118,50 @@ def test_viewer_controls_config_reflects_viewer_state() -> None:
 
     config = viewer_controls_config(state)
 
-    assert config.fov_degrees == 75.0
-    assert config.show_axes is False
-    assert config.show_horizon is True
-    assert config.show_origin is True
-    assert config.show_stats is True
-    assert config.interactive_quality == 70
-    assert config.settled_quality == "png"
-    assert config.interactive_max_side == 1024
-    assert config.internal_render_max_side == 2048
-    assert config.rotation.x_degrees == 10.0
-    assert config.rotation.y_degrees == 20.0
-    assert config.rotation.z_degrees == 30.0
-    assert config.origin.x == 1.0
-    assert config.origin.y == 2.0
-    assert config.origin.z == 3.0
+    assert config.camera.fov_degrees == 75.0
+    assert config.overlays.show_axes is False
+    assert config.overlays.show_horizon is True
+    assert config.overlays.show_origin is True
+    assert config.overlays.show_stats is True
+    assert config.render.interactive_quality == 70
+    assert config.render.settled_quality == "png"
+    assert config.render.interactive_max_side == 1024
+    assert config.render.internal_render_max_side == 2048
+    assert config.navigation.move_speed == 0.125
+    assert config.navigation.sprint_multiplier == 4.0
+    assert config.transform.rotation.x_degrees == 10.0
+    assert config.transform.rotation.y_degrees == 20.0
+    assert config.transform.rotation.z_degrees == 30.0
+    assert config.transform.origin.x == 1.0
+    assert config.transform.origin.y == 2.0
+    assert config.transform.origin.z == 3.0
 
 
 def test_apply_viewer_config_updates_viewer_state() -> None:
     state = ViewerState()
     config = ViewerControlsConfig(
-        fov_degrees=72.0,
-        show_axes=False,
-        show_horizon=True,
-        show_origin=True,
-        show_stats=True,
-        interactive_quality=80,
-        settled_quality="png",
-        interactive_max_side=900,
-        internal_render_max_side=1800,
-        rotation={"x_degrees": 15.0, "y_degrees": -25.0, "z_degrees": 45.0},
-        origin={"x": 4.0, "y": 5.0, "z": 6.0},
+        camera={"fov_degrees": 72.0},
+        overlays={
+            "show_axes": False,
+            "show_horizon": True,
+            "show_origin": True,
+            "show_stats": True,
+        },
+        render={
+            "interactive_quality": 80,
+            "settled_quality": "png",
+            "interactive_max_side": 900,
+            "internal_render_max_side": 1800,
+        },
+        navigation={"move_speed": 0.3, "sprint_multiplier": 6.0},
+        transform={
+            "rotation": {
+                "x_degrees": 15.0,
+                "y_degrees": -25.0,
+                "z_degrees": 45.0,
+            },
+            "origin": {"x": 4.0, "y": 5.0, "z": 6.0},
+        },
     )
 
     returned = apply_viewer_config(state, config)
@@ -164,6 +177,8 @@ def test_apply_viewer_config_updates_viewer_state() -> None:
     assert state.settled_quality == "png"
     assert state.interactive_max_side == 900
     assert state.internal_render_max_side == 1800
+    assert state.keyboard_move_speed == 0.3
+    assert state.keyboard_sprint_multiplier == 6.0
     assert state.viewer_rotation_x_degrees == 15.0
     assert state.viewer_rotation_y_degrees == -25.0
     assert state.viewer_rotation_z_degrees == 45.0
@@ -226,9 +241,16 @@ def test_apply_viewer_pipeline_config_returns_pipeline_subtree() -> None:
     state = ViewerState()
     config = _CombinedConfig(
         viewer=ViewerControlsConfig(
-            fov_degrees=68.0,
-            show_axes=False,
-            rotation={"x_degrees": 5.0, "y_degrees": 0.0, "z_degrees": 0.0},
+            camera={"fov_degrees": 68.0},
+            overlays={"show_axes": False},
+            navigation={"move_speed": 0.2, "sprint_multiplier": 3.0},
+            transform={
+                "rotation": {
+                    "x_degrees": 5.0,
+                    "y_degrees": 0.0,
+                    "z_degrees": 0.0,
+                }
+            },
         ),
         pipeline=_PipelineConfig(value=9),
     )
@@ -238,7 +260,19 @@ def test_apply_viewer_pipeline_config_returns_pipeline_subtree() -> None:
     assert pipeline_config.value == 9
     assert state.camera_state.fov_degrees == 68.0
     assert state.show_axes is False
+    assert state.keyboard_move_speed == 0.2
+    assert state.keyboard_sprint_multiplier == 3.0
     assert state.viewer_rotation_x_degrees == 5.0
+
+
+def test_set_keyboard_navigation_updates_viewer_state() -> None:
+    state = ViewerState()
+
+    returned = state.set_keyboard_navigation(0.4, 5.0)
+
+    assert returned is state
+    assert state.keyboard_move_speed == 0.4
+    assert state.keyboard_sprint_multiplier == 5.0
 
 
 def test_camera_state_with_convention_round_trips() -> None:

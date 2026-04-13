@@ -599,6 +599,8 @@ class ViewerState:
     viewer_rotation_y_degrees: float = 0.0
     viewer_rotation_z_degrees: float = 0.0
     origin: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    keyboard_move_speed: float = 0.125
+    keyboard_sprint_multiplier: float = 4.0
     _reset_camera_callback: Callable[[CameraState], None] | None = None
     _viewer_rotation_callback: Callable[[float, float, float], None] | None = (
         None
@@ -608,6 +610,7 @@ class ViewerState:
     _show_origin_callback: Callable[[bool], None] | None = None
     _show_stats_callback: Callable[[bool], None] | None = None
     _origin_callback: Callable[[float, float, float], None] | None = None
+    _keyboard_navigation_callback: Callable[[float, float], None] | None = None
     _active_marimo_viewer_ref: weakref.ReferenceType[MarimoViewer] | None = None
 
     def __init__(
@@ -625,6 +628,8 @@ class ViewerState:
         show_horizon: bool = False,
         show_origin: bool = False,
         show_stats: bool = False,
+        keyboard_move_speed: float = 0.125,
+        keyboard_sprint_multiplier: float = 4.0,
     ) -> None:
         resolved_camera_state = camera_state or CameraState.default(
             camera_convention=camera_convention
@@ -655,6 +660,16 @@ class ViewerState:
                 "interactive_max_side must be None or a positive integer, "
                 f"got {interactive_max_side}."
             )
+        if keyboard_move_speed <= 0.0:
+            raise ValueError(
+                "keyboard_move_speed must be positive, "
+                f"got {keyboard_move_speed}."
+            )
+        if keyboard_sprint_multiplier < 1.0:
+            raise ValueError(
+                "keyboard_sprint_multiplier must be at least 1.0, "
+                f"got {keyboard_sprint_multiplier}."
+            )
         self.camera_state = resolved_camera_state
         self.initial_camera_state = resolved_camera_state
         self.camera_convention = resolved_camera_state.camera_convention
@@ -673,6 +688,8 @@ class ViewerState:
         self.viewer_rotation_y_degrees = 0.0
         self.viewer_rotation_z_degrees = 0.0
         self.origin = (0.0, 0.0, 0.0)
+        self.keyboard_move_speed = keyboard_move_speed
+        self.keyboard_sprint_multiplier = keyboard_sprint_multiplier
         self._reset_camera_callback = None
         self._viewer_rotation_callback = None
         self._show_axes_callback = None
@@ -680,6 +697,7 @@ class ViewerState:
         self._show_origin_callback = None
         self._show_stats_callback = None
         self._origin_callback = None
+        self._keyboard_navigation_callback = None
 
     def reset_camera(self) -> ViewerState:
         """Reset the current camera state back to the initial camera state."""
@@ -773,6 +791,28 @@ class ViewerState:
             self._origin_callback(x, y, z)
         return self
 
+    def set_keyboard_navigation(
+        self,
+        move_speed: float,
+        sprint_multiplier: float,
+    ) -> ViewerState:
+        """Set keyboard navigation speed and sprint multiplier."""
+        if move_speed <= 0.0:
+            raise ValueError(f"move_speed must be positive, got {move_speed}.")
+        if sprint_multiplier < 1.0:
+            raise ValueError(
+                "sprint_multiplier must be at least 1.0, "
+                f"got {sprint_multiplier}."
+            )
+        self.keyboard_move_speed = move_speed
+        self.keyboard_sprint_multiplier = sprint_multiplier
+        if self._keyboard_navigation_callback is not None:
+            self._keyboard_navigation_callback(
+                move_speed,
+                sprint_multiplier,
+            )
+        return self
+
     def copy(self) -> ViewerState:
         """Return a shallow copy of the current viewer configuration/state."""
         copied = ViewerState(
@@ -789,6 +829,8 @@ class ViewerState:
             show_horizon=self.show_horizon,
             show_origin=self.show_origin,
             show_stats=self.show_stats,
+            keyboard_move_speed=self.keyboard_move_speed,
+            keyboard_sprint_multiplier=self.keyboard_sprint_multiplier,
         )
         copied.initial_camera_state = self.initial_camera_state
         copied.viewer_rotation_x_degrees = self.viewer_rotation_x_degrees
@@ -1156,6 +1198,8 @@ class _NativeViewerAnyWidget(anywidget.AnyWidget):
     origin_x = traitlets.Float(0.0).tag(sync=True)
     origin_y = traitlets.Float(0.0).tag(sync=True)
     origin_z = traitlets.Float(0.0).tag(sync=True)
+    keyboard_move_speed = traitlets.Float(0.125).tag(sync=True)
+    keyboard_sprint_multiplier = traitlets.Float(4.0).tag(sync=True)
     controls_hint = traitlets.Unicode(
         "Orbit: drag | Pan: right-drag | Move: WASDQE | Zoom: wheel"
     ).tag(sync=True)
@@ -1177,6 +1221,8 @@ class _NativeViewerAnyWidget(anywidget.AnyWidget):
         origin_x: float,
         origin_y: float,
         origin_z: float,
+        keyboard_move_speed: float = 0.125,
+        keyboard_sprint_multiplier: float = 4.0,
         stream_port: int,
         stream_path: str,
         stream_token: str,
@@ -1194,6 +1240,8 @@ class _NativeViewerAnyWidget(anywidget.AnyWidget):
             origin_x=origin_x,
             origin_y=origin_y,
             origin_z=origin_z,
+            keyboard_move_speed=keyboard_move_speed,
+            keyboard_sprint_multiplier=keyboard_sprint_multiplier,
             stream_port=stream_port,
             stream_path=stream_path,
             stream_token=stream_token,
@@ -1266,6 +1314,9 @@ class MarimoViewer(_StableMarimoAnyWidget):
             self._state._show_origin_callback = self.set_show_origin
             self._state._show_stats_callback = self.set_show_stats
             self._state._origin_callback = self.set_origin
+            self._state._keyboard_navigation_callback = (
+                self.set_keyboard_navigation
+            )
         self.rerender()
 
     def close(self) -> None:
@@ -1298,6 +1349,7 @@ class MarimoViewer(_StableMarimoAnyWidget):
             self._clear_state_callback("_show_origin_callback")
             self._clear_state_callback("_show_stats_callback")
             self._clear_state_callback("_origin_callback")
+            self._clear_state_callback("_keyboard_navigation_callback")
             active_ref = self._state._active_marimo_viewer_ref
             active_viewer = None if active_ref is None else active_ref()
             if active_viewer is self:
@@ -1546,6 +1598,18 @@ class MarimoViewer(_StableMarimoAnyWidget):
         self.widget.origin_y = y
         self.widget.origin_z = z
         self.widget.send_state(["origin_x", "origin_y", "origin_z"])
+
+    def set_keyboard_navigation(
+        self,
+        move_speed: float,
+        sprint_multiplier: float,
+    ) -> None:
+        """Update keyboard navigation tuning in the live viewer."""
+        self.widget.keyboard_move_speed = move_speed
+        self.widget.keyboard_sprint_multiplier = sprint_multiplier
+        self.widget.send_state(
+            ["keyboard_move_speed", "keyboard_sprint_multiplier"]
+        )
 
     def rerender(self, *, interactive: bool = False) -> None:
         """Request a fresh render without changing the camera pose.
@@ -1893,6 +1957,8 @@ def marimo_viewer(
         origin_x=state.origin[0],
         origin_y=state.origin[1],
         origin_z=state.origin[2],
+        keyboard_move_speed=state.keyboard_move_speed,
+        keyboard_sprint_multiplier=state.keyboard_sprint_multiplier,
         stream_port=stream_server.port,
         stream_path=f"/streams/{stream_id}",
         stream_token=stream_token,

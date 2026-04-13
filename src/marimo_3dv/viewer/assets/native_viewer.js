@@ -709,7 +709,18 @@ function updateCameraMatrix() {
     const forward = normalize(matrixColumn(rotation, 2));
     const right = normalize(matrixColumn(rotation, 0));
     const up = normalize(matrixColumn(rotation, 1));
-    const speed = Math.max(0.05, orbitDistance * 0.8) * deltaSeconds;
+    const configuredMoveSpeed = Number(model.get("keyboard_move_speed")) || 0.125;
+    const configuredSprintMultiplier =
+      Number(model.get("keyboard_sprint_multiplier")) || 4.0;
+    const sprintMultiplier =
+      pressedKeys.has("shift") ? configuredSprintMultiplier : 1.0;
+    const speed =
+      Math.max(
+        configuredMoveSpeed,
+        orbitDistance * configuredMoveSpeed * 16.0,
+      ) *
+      sprintMultiplier *
+      deltaSeconds;
     let motion = [0, 0, 0];
     if (pressedKeys.has("w")) motion = add(motion, scale(forward, speed));
     if (pressedKeys.has("s")) motion = add(motion, scale(forward, -speed));
@@ -1144,7 +1155,7 @@ function updateCameraMatrix() {
 
   frame.addEventListener("keydown", (event) => {
     const key = event.key.toLowerCase();
-    if (!["w", "a", "s", "d", "q", "e"].includes(key)) {
+    if (!["w", "a", "s", "d", "q", "e", "shift"].includes(key)) {
       return;
     }
     event.preventDefault();

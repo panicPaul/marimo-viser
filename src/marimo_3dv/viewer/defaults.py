@@ -32,22 +32,58 @@ class ViewerRotationConfig(BaseModel):
     z_degrees: float = Field(default=0.0, ge=-180.0, le=180.0)
 
 
-class ViewerControlsConfig(BaseModel):
-    """Reusable viewer controls schema."""
+class ViewerCameraConfig(BaseModel):
+    """Camera settings."""
 
     fov_degrees: float = Field(default=60.0, gt=0.0, lt=180.0)
+
+
+class ViewerOverlayConfig(BaseModel):
+    """Overlay visibility settings."""
+
     show_axes: bool = Field(default=True)
     show_horizon: bool = Field(default=False)
     show_origin: bool = Field(default=False)
     show_stats: bool = Field(default=False)
+
+
+class ViewerRenderConfig(BaseModel):
+    """Render quality settings."""
+
     interactive_quality: int = Field(default=50, ge=1, le=100)
     settled_quality: Literal["jpeg_95", "jpeg_100", "png"] = Field(
         default="jpeg_100"
     )
     interactive_max_side: int = Field(default=1980, ge=1)
     internal_render_max_side: int = Field(default=3840, ge=1)
+
+
+class ViewerNavigationConfig(BaseModel):
+    """Keyboard navigation tuning."""
+
+    move_speed: float = Field(default=0.125, gt=0.0)
+    sprint_multiplier: float = Field(default=4.0, ge=1.0)
+
+
+class ViewerTransformConfig(BaseModel):
+    """Viewer-frame transform defaults."""
+
     rotation: ViewerRotationConfig = Field(default_factory=ViewerRotationConfig)
     origin: ViewerOriginConfig = Field(default_factory=ViewerOriginConfig)
+
+
+class ViewerControlsConfig(BaseModel):
+    """Reusable viewer controls schema."""
+
+    camera: ViewerCameraConfig = Field(default_factory=ViewerCameraConfig)
+    overlays: ViewerOverlayConfig = Field(default_factory=ViewerOverlayConfig)
+    render: ViewerRenderConfig = Field(default_factory=ViewerRenderConfig)
+    navigation: ViewerNavigationConfig = Field(
+        default_factory=ViewerNavigationConfig
+    )
+    transform: ViewerTransformConfig = Field(
+        default_factory=ViewerTransformConfig
+    )
 
 
 @dataclass(frozen=True)
@@ -75,24 +111,38 @@ def viewer_controls_config(
 ) -> ViewerControlsConfig:
     """Return viewer controls config populated from a ViewerState."""
     return ViewerControlsConfig(
-        fov_degrees=viewer_state.camera_state.fov_degrees,
-        show_axes=viewer_state.show_axes,
-        show_horizon=viewer_state.show_horizon,
-        show_origin=viewer_state.show_origin,
-        show_stats=viewer_state.show_stats,
-        interactive_quality=viewer_state.interactive_quality,
-        settled_quality=viewer_state.settled_quality,
-        interactive_max_side=viewer_state.interactive_max_side or 1980,
-        internal_render_max_side=viewer_state.internal_render_max_side or 3840,
-        rotation=ViewerRotationConfig(
-            x_degrees=viewer_state.viewer_rotation_x_degrees,
-            y_degrees=viewer_state.viewer_rotation_y_degrees,
-            z_degrees=viewer_state.viewer_rotation_z_degrees,
+        camera=ViewerCameraConfig(
+            fov_degrees=viewer_state.camera_state.fov_degrees,
         ),
-        origin=ViewerOriginConfig(
-            x=viewer_state.origin[0],
-            y=viewer_state.origin[1],
-            z=viewer_state.origin[2],
+        overlays=ViewerOverlayConfig(
+            show_axes=viewer_state.show_axes,
+            show_horizon=viewer_state.show_horizon,
+            show_origin=viewer_state.show_origin,
+            show_stats=viewer_state.show_stats,
+        ),
+        render=ViewerRenderConfig(
+            interactive_quality=viewer_state.interactive_quality,
+            settled_quality=viewer_state.settled_quality,
+            interactive_max_side=viewer_state.interactive_max_side or 1980,
+            internal_render_max_side=(
+                viewer_state.internal_render_max_side or 3840
+            ),
+        ),
+        navigation=ViewerNavigationConfig(
+            move_speed=viewer_state.keyboard_move_speed,
+            sprint_multiplier=viewer_state.keyboard_sprint_multiplier,
+        ),
+        transform=ViewerTransformConfig(
+            rotation=ViewerRotationConfig(
+                x_degrees=viewer_state.viewer_rotation_x_degrees,
+                y_degrees=viewer_state.viewer_rotation_y_degrees,
+                z_degrees=viewer_state.viewer_rotation_z_degrees,
+            ),
+            origin=ViewerOriginConfig(
+                x=viewer_state.origin[0],
+                y=viewer_state.origin[1],
+                z=viewer_state.origin[2],
+            ),
         ),
     )
 
@@ -102,25 +152,34 @@ def apply_viewer_config(
     config: ViewerControlsConfig,
 ) -> ViewerState:
     """Apply reusable viewer controls config onto a ViewerState."""
-    viewer_state.set_fov_degrees(config.fov_degrees, push_to_viewer=False)
-    viewer_state.interactive_quality = config.interactive_quality
-    viewer_state.settled_quality = config.settled_quality
-    viewer_state.interactive_max_side = config.interactive_max_side
-    viewer_state.internal_render_max_side = config.internal_render_max_side
+    viewer_state.set_fov_degrees(
+        config.camera.fov_degrees,
+        push_to_viewer=False,
+    )
+    viewer_state.interactive_quality = config.render.interactive_quality
+    viewer_state.settled_quality = config.render.settled_quality
+    viewer_state.interactive_max_side = config.render.interactive_max_side
+    viewer_state.internal_render_max_side = (
+        config.render.internal_render_max_side
+    )
     return (
-        viewer_state.set_show_axes(config.show_axes)
-        .set_show_horizon(config.show_horizon)
-        .set_show_origin(config.show_origin)
-        .set_show_stats(config.show_stats)
+        viewer_state.set_show_axes(config.overlays.show_axes)
+        .set_show_horizon(config.overlays.show_horizon)
+        .set_show_origin(config.overlays.show_origin)
+        .set_show_stats(config.overlays.show_stats)
+        .set_keyboard_navigation(
+            config.navigation.move_speed,
+            config.navigation.sprint_multiplier,
+        )
         .set_viewer_rotation(
-            config.rotation.x_degrees,
-            config.rotation.y_degrees,
-            config.rotation.z_degrees,
+            config.transform.rotation.x_degrees,
+            config.transform.rotation.y_degrees,
+            config.transform.rotation.z_degrees,
         )
         .set_origin(
-            config.origin.x,
-            config.origin.y,
-            config.origin.z,
+            config.transform.origin.x,
+            config.transform.origin.y,
+            config.transform.origin.z,
         )
     )
 
@@ -210,10 +269,15 @@ def apply_viewer_pipeline_config(
 
 __all__ = [
     "CombinedViewerPipelineControlsHandle",
+    "ViewerCameraConfig",
     "ViewerControlsConfig",
     "ViewerControlsHandle",
+    "ViewerNavigationConfig",
     "ViewerOriginConfig",
+    "ViewerOverlayConfig",
+    "ViewerRenderConfig",
     "ViewerRotationConfig",
+    "ViewerTransformConfig",
     "apply_viewer_config",
     "apply_viewer_pipeline_config",
     "viewer_controls_config",

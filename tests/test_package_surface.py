@@ -9,9 +9,14 @@ def test_core_imports_work():
         MarimoViewer,
         Viewer,
         ViewerBackendBundle,
+        ViewerCameraConfig,
         ViewerClick,
         ViewerControlsConfig,
+        ViewerNavigationConfig,
+        ViewerOverlayConfig,
+        ViewerRenderConfig,
         ViewerState,
+        ViewerTransformConfig,
         apply_viewer_config,
         apply_viewer_pipeline_config,
         backend_bundle,
@@ -25,9 +30,14 @@ def test_core_imports_work():
     assert MarimoViewer is not None
     assert Viewer is not None
     assert ViewerBackendBundle is not None
+    assert ViewerCameraConfig is not None
     assert ViewerClick is not None
     assert ViewerControlsConfig is not None
+    assert ViewerNavigationConfig is not None
+    assert ViewerOverlayConfig is not None
+    assert ViewerRenderConfig is not None
     assert ViewerState is not None
+    assert ViewerTransformConfig is not None
     assert apply_viewer_config is not None
     assert apply_viewer_pipeline_config is not None
     assert backend_bundle is not None

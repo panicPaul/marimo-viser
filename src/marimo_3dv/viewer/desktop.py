@@ -431,7 +431,7 @@ class DesktopViewer:
                 if drag_distance > _CLICK_THRESHOLD_PIXELS:
                     self._input.drag_exceeded_click_threshold = True
             if self._input.mode == "orbit":
-                self._apply_orbit(dx, dy)
+                self._apply_orbit(dx, -dy)
             elif self._input.mode == "pan":
                 self._apply_pan(dx, dy)
 

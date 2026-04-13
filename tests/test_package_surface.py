@@ -24,6 +24,7 @@ def test_core_imports_work():
         gs_backend_bundle,
         load_splat_scene,
         load_splat_scene_from_config,
+        pick_splat_load_config,
         splat_load_form,
         viewer_controls_config,
         viewer_controls_gui,
@@ -49,6 +50,7 @@ def test_core_imports_work():
     assert gs_backend_bundle is not None
     assert load_splat_scene is not None
     assert load_splat_scene_from_config is not None
+    assert pick_splat_load_config is not None
     assert splat_load_form is not None
     assert viewer_controls_config is not None
     assert viewer_controls_gui is not None

@@ -117,6 +117,29 @@ def splat_load_form(*, default_path: Path | None = None) -> Any:
     )
 
 
+def pick_splat_load_config(
+    *,
+    title: str = "Open PLY file",
+) -> SplatLoadConfig | None:
+    """Prompt for a splat PLY file using the native desktop file picker."""
+    import subprocess
+
+    result = subprocess.run(
+        [
+            "zenity",
+            "--file-selection",
+            f"--title={title}",
+            "--file-filter=*.ply",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    ply_path = Path(result.stdout.strip())
+    if not ply_path.exists():
+        return None
+    return SplatLoadConfig(ply_path=ply_path)
+
+
 def infer_sh_degree(num_bases: int) -> int:
     """Infer the SH degree from the number of basis functions."""
     degree = isqrt(num_bases) - 1
@@ -603,6 +626,7 @@ __all__ = [
     "load_splat_scene",
     "load_splat_scene_from_config",
     "max_sh_degree_op",
+    "pick_splat_load_config",
     "show_distribution_op",
     "splat_load_form",
 ]

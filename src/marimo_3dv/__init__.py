@@ -23,6 +23,7 @@ from marimo_3dv.ops.gs import (
     load_splat_scene,
     load_splat_scene_from_config,
     max_sh_degree_op,
+    pick_splat_load_config,
     show_distribution_op,
     splat_load_form,
 )
@@ -141,6 +142,7 @@ __all__ = [
     "paint_ray_op",
     "pca_alignment_op",
     "pca_transform_from_points",
+    "pick_splat_load_config",
     "render_node",
     "show_distribution_op",
     "similarity_from_cameras",

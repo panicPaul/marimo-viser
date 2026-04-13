@@ -34,6 +34,7 @@ with app.setup:
         apply_viewer_pipeline_config,
         gs_backend_bundle,
         load_splat_scene_from_config,
+        pick_splat_load_config,
         splat_load_form,
         viewer_pipeline_controls_gui,
     )
@@ -90,7 +91,11 @@ def _():
 
 @app.cell
 def _(load_form, viewer_state):
-    scene = load_splat_scene_from_config(load_form.value, viewer_state)
+    if mo.running_in_notebook():
+        scene = load_splat_scene_from_config(load_form.value, viewer_state)
+    else:
+        load_config = pick_splat_load_config()
+        scene = load_splat_scene_from_config(load_config, viewer_state)
     return (scene,)
 
 

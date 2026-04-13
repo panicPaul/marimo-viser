@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+import gc
 from dataclasses import dataclass, field
+from math import isqrt
+from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
 import torch
+from jaxtyping import Float
+from plyfile import PlyData
 from pydantic import BaseModel, Field
+from torch import Tensor
 
+from marimo_3dv.gui.pydantic import form_gui
 from marimo_3dv.pipeline.bundle import ViewerBackendBundle, backend_bundle
 from marimo_3dv.pipeline.context import ViewerContext
 from marimo_3dv.pipeline.gui import (
@@ -20,6 +27,7 @@ from marimo_3dv.pipeline.gui import (
     effect_node,
     render_node,
 )
+from marimo_3dv.viewer.widget import ViewerState
 
 
 @runtime_checkable
@@ -55,6 +63,211 @@ class SplatRenderData(Protocol):
     def sh_degree(self) -> int:
         """Maximum SH degree present in the data."""
         ...
+
+
+@dataclass(frozen=True)
+class SplatScene:
+    """Minimal Gaussian splat scene used by the default GS backend."""
+
+    center_positions: Float[Tensor, "num_splats 3"]
+    log_half_extents: Float[Tensor, "num_splats 3"]
+    quaternion_orientation: Float[Tensor, "num_splats 4"]
+    spherical_harmonics: Float[Tensor, "num_splats num_bases 3"]
+    opacity_logits: Float[Tensor, "num_splats 1"]
+    sh_degree: int
+
+
+class SplatLoadGpuConfig(BaseModel):
+    """GPU cleanup options for notebook-driven scene replacement."""
+
+    close_existing_viewer: bool = Field(
+        default=True,
+        description="Close the active viewer before loading a new scene.",
+    )
+    empty_cuda_cache: bool = Field(
+        default=True,
+        description="Release unused CUDA allocator cache before reload.",
+    )
+
+
+class SplatLoadConfig(BaseModel):
+    """Configuration for loading a Gaussian splat PLY file."""
+
+    ply_path: Path = Field(
+        default=Path.cwd() / "point_cloud.ply",
+        description="Path to a 3DGS-style `.ply` file.",
+    )
+    gpu: SplatLoadGpuConfig = Field(
+        default_factory=SplatLoadGpuConfig,
+        description="How to clean up GPU resources before replacing a scene.",
+    )
+
+
+def splat_load_form(*, default_path: Path | None = None) -> Any:
+    """Build a reusable notebook form for loading splat scenes."""
+    default_config = (
+        SplatLoadConfig()
+        if default_path is None
+        else SplatLoadConfig(ply_path=default_path)
+    )
+    return form_gui(
+        SplatLoadConfig,
+        value=default_config,
+        submit_label="Load File",
+    )
+
+
+def infer_sh_degree(num_bases: int) -> int:
+    """Infer the SH degree from the number of basis functions."""
+    degree = isqrt(num_bases) - 1
+    if (degree + 1) ** 2 != num_bases:
+        raise ValueError(f"Invalid SH basis count: {num_bases}")
+    if not 0 <= degree <= 4:
+        raise ValueError(f"Only SH degrees 0-4 are supported, got {degree}")
+    return degree
+
+
+def get_gsplat_device() -> torch.device:
+    """Return the default device used for gsplat rasterization."""
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            "gsplat viewer requires CUDA, but CUDA is unavailable."
+        )
+    return torch.device("cuda")
+
+
+def cleanup_before_splat_reload(
+    viewer_state: ViewerState,
+    *,
+    close_existing_viewer: bool,
+    empty_cuda_cache: bool,
+) -> None:
+    """Release viewer-owned resources before replacing the active scene."""
+    if close_existing_viewer:
+        active_ref = viewer_state._active_marimo_viewer_ref
+        active_viewer = None if active_ref is None else active_ref()
+        if active_viewer is not None:
+            active_viewer.close()
+
+    gc.collect()
+
+    if torch.cuda.is_available() and empty_cuda_cache:
+        torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
+
+
+def load_splat_scene(path: Path) -> SplatScene:
+    """Load a 3DGS-style `.ply` file into a GPU-resident splat scene."""
+    device = get_gsplat_device()
+    ply_data = PlyData.read(path)
+    vertices = ply_data["vertex"]
+    property_names = list(vertices.data.dtype.names)
+
+    centers = np.stack(
+        [vertices["x"], vertices["y"], vertices["z"]],
+        axis=1,
+    ).astype(np.float32)
+
+    dc_coefficients = np.stack(
+        [vertices["f_dc_0"], vertices["f_dc_1"], vertices["f_dc_2"]],
+        axis=1,
+    ).astype(np.float32)
+
+    rest_feature_names = sorted(
+        [name for name in property_names if name.startswith("f_rest_")],
+        key=lambda name: int(name.split("_")[-1]),
+    )
+    num_rest_coefficients = len(rest_feature_names)
+    if num_rest_coefficients % 3 != 0:
+        raise ValueError(
+            "Expected the number of `f_rest_*` attributes to be divisible by 3."
+        )
+
+    num_bases = 1 + num_rest_coefficients // 3
+    sh_degree = infer_sh_degree(num_bases)
+    sh_coefficients = np.zeros(
+        (centers.shape[0], num_bases, 3),
+        dtype=np.float32,
+    )
+    sh_coefficients[:, 0, :] = dc_coefficients
+    if rest_feature_names:
+        rest_coefficients = np.stack(
+            [
+                np.asarray(vertices[name], dtype=np.float32)
+                for name in rest_feature_names
+            ],
+            axis=1,
+        )
+        rest_coefficients = rest_coefficients.reshape(
+            centers.shape[0],
+            3,
+            num_bases - 1,
+        )
+        sh_coefficients[:, 1:num_bases, :] = np.transpose(
+            rest_coefficients,
+            (0, 2, 1),
+        )
+
+    scale_feature_names = sorted(
+        [name for name in property_names if name.startswith("scale_")],
+        key=lambda name: int(name.split("_")[-1]),
+    )
+    rotation_feature_names = sorted(
+        [name for name in property_names if name.startswith("rot")],
+        key=lambda name: int(name.split("_")[-1]),
+    )
+    log_scales = (
+        np.stack(
+            [
+                np.asarray(vertices[name], dtype=np.float32)
+                for name in scale_feature_names
+            ],
+            axis=1,
+        )
+        if scale_feature_names
+        else np.full((centers.shape[0], 3), np.log(0.01), dtype=np.float32)
+    )
+    rotations = (
+        np.stack(
+            [
+                np.asarray(vertices[name], dtype=np.float32)
+                for name in rotation_feature_names
+            ],
+            axis=1,
+        )
+        if rotation_feature_names
+        else np.tile(
+            np.array([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32),
+            (centers.shape[0], 1),
+        )
+    )
+    opacity_logits = np.asarray(vertices["opacity"], dtype=np.float32)[:, None]
+
+    return SplatScene(
+        center_positions=torch.from_numpy(centers).to(device=device),
+        log_half_extents=torch.from_numpy(log_scales).to(device=device),
+        quaternion_orientation=torch.from_numpy(rotations).to(device=device),
+        spherical_harmonics=torch.from_numpy(sh_coefficients).to(device=device),
+        opacity_logits=torch.from_numpy(opacity_logits).to(device=device),
+        sh_degree=sh_degree,
+    )
+
+
+def load_splat_scene_from_config(
+    config: SplatLoadConfig | None,
+    viewer_state: ViewerState,
+) -> SplatScene | None:
+    """Clean up viewer state and load the scene requested by a load form."""
+    if config is None:
+        return None
+    cleanup_before_splat_reload(
+        viewer_state,
+        close_existing_viewer=config.gpu.close_existing_viewer,
+        empty_cuda_cache=config.gpu.empty_cuda_cache,
+    )
+    if not config.ply_path.exists():
+        return None
+    return load_splat_scene(config.ply_path)
 
 
 @dataclass(frozen=True)
@@ -375,12 +588,21 @@ __all__ = [
     "GsRenderView",
     "MaxShDegreeConfig",
     "ShowDistributionConfig",
+    "SplatLoadConfig",
+    "SplatLoadGpuConfig",
     "SplatRenderData",
+    "SplatScene",
+    "cleanup_before_splat_reload",
     "compile_gs_render_view",
     "filter_opacity_op",
     "filter_size_op",
+    "get_gsplat_device",
     "gs_backend_bundle",
     "gs_render_view",
+    "infer_sh_degree",
+    "load_splat_scene",
+    "load_splat_scene_from_config",
     "max_sh_degree_op",
     "show_distribution_op",
+    "splat_load_form",
 ]

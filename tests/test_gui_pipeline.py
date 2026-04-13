@@ -84,7 +84,13 @@ def test_backend_bundle_builds_pipeline_with_default_items() -> None:
 
 def test_backend_bundle_exposes_viewer_controls_defaults() -> None:
     def _transform(config):
-        return config.model_copy(update={"show_stats": True})
+        return config.model_copy(
+            update={
+                "overlays": config.overlays.model_copy(
+                    update={"show_stats": True}
+                )
+            }
+        )
 
     bundle = backend_bundle(
         name="list",
@@ -95,7 +101,7 @@ def test_backend_bundle_exposes_viewer_controls_defaults() -> None:
 
     config = bundle.viewer_controls(_make_viewer_state())
 
-    assert config.show_stats is True
+    assert config.overlays.show_stats is True
 
 
 def test_gs_backend_bundle_returns_pipeline_bundle() -> None:

@@ -62,9 +62,13 @@ class GuiOp(Generic[RenderDataT]):
         hook: The op's stage callback (see GuiPipeline.build for signatures).
         runtime_state_factory: Optional factory returning fresh mutable state
             for this op. Called once per ``GuiPipeline.build()`` call.
-        requires_prepared_copy: Whether this op requires a prepared working
-            copy of the render data. Pipelines exclude these ops unless
-            ``allow_prepared_copy=True`` is set explicitly.
+        mutates_render_data: Whether this op mutates prepare-stage render
+            data in place. When any active prepare op sets this flag, the
+            pipeline clones the source render data once via
+            ``prepare_copy_fn`` before running the prepare stage.
+        requires_prepared_copy: Whether this op requires the pipeline to be
+            configured with prepare-copy support. Pipelines exclude these ops
+            unless ``allow_prepared_copy=True`` is set explicitly.
     """
 
     name: str
@@ -73,6 +77,7 @@ class GuiOp(Generic[RenderDataT]):
     stage: PipelineStage
     hook: Callable[..., Any]
     runtime_state_factory: Callable[[], Any] | None = None
+    mutates_render_data: bool = False
     requires_prepared_copy: bool = False
 
 
@@ -92,6 +97,7 @@ class _PipelineRuntimeState(Generic[RenderDataT]):
     op_runtime_states: dict[str, Any]
     render_data: RenderDataT
     viewer_state: ViewerState
+    prepare_copy_fn: Callable[[RenderDataT], RenderDataT] | None = None
     prepared_render_data: RenderDataT | None = None
     prepare_cache_key: str | None = None
 
@@ -207,6 +213,12 @@ def _get_prepared_render_data(
     ]
     if not prepare_ops:
         return pipeline_state.render_data
+    has_mutating_prepare_op = any(op.mutates_render_data for op in prepare_ops)
+    if has_mutating_prepare_op and pipeline_state.prepare_copy_fn is None:
+        raise ValueError(
+            "This pipeline includes prepare_render ops that mutate render "
+            "data, but no prepare_copy_fn was configured."
+        )
 
     prepare_configs = {
         op.name: _extract_op_config(op, config_dict).model_dump(mode="json")
@@ -226,7 +238,16 @@ def _get_prepared_render_data(
     ):
         return pipeline_state.prepared_render_data
 
+    # Drop the previous prepared copy before building the next one so large
+    # tensor clones can be reclaimed or reused by the allocator immediately.
+    pipeline_state.prepared_render_data = None
+    pipeline_state.prepare_cache_key = None
+
     prepared_render_data = pipeline_state.render_data
+    if has_mutating_prepare_op:
+        prepared_render_data = pipeline_state.prepare_copy_fn(
+            prepared_render_data
+        )
     for op in prepare_ops:
         op_config = _extract_op_config(op, config_dict)
         op_runtime = pipeline_state.op_runtime_states.get(op.name)
@@ -314,9 +335,15 @@ class GuiPipeline(Generic[RenderDataT]):
         )
     """
 
-    def __init__(self, *, allow_prepared_copy: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        allow_prepared_copy: bool = False,
+        prepare_copy_fn: Callable[[RenderDataT], RenderDataT] | None = None,
+    ) -> None:
         self._ops: list[GuiOp[RenderDataT]] = []
         self._allow_prepared_copy = allow_prepared_copy
+        self._prepare_copy_fn = prepare_copy_fn
 
     def pipe(self, op: GuiOp[RenderDataT]) -> GuiPipeline[RenderDataT]:
         """Append a GuiOp and return a new pipeline.
@@ -328,7 +355,8 @@ class GuiPipeline(Generic[RenderDataT]):
             A new GuiPipeline with the op added.
         """
         next_pipeline: GuiPipeline[RenderDataT] = GuiPipeline(
-            allow_prepared_copy=self._allow_prepared_copy
+            allow_prepared_copy=self._allow_prepared_copy,
+            prepare_copy_fn=self._prepare_copy_fn,
         )
         next_pipeline._ops = [*self._ops, op]
         return next_pipeline
@@ -367,6 +395,7 @@ class GuiPipeline(Generic[RenderDataT]):
             op_runtime_states=op_runtime_states,
             render_data=render_data,
             viewer_state=viewer_state,
+            prepare_copy_fn=self._prepare_copy_fn,
         )
 
         return GuiPipelineResult(

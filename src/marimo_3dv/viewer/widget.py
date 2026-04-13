@@ -11,6 +11,7 @@ import socket
 import threading
 import time
 import traceback
+import weakref
 from collections.abc import Callable, Iterator, MutableMapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -214,6 +215,16 @@ class _FrameStreamServer:
             self._streams[stream_id] = _FrameStreamState(token=token)
         return stream_id, token
 
+    def unregister_stream(self, stream_id: str) -> None:
+        """Remove a stream and close any connected websocket clients."""
+        with self._lock:
+            stream_state = self._streams.pop(stream_id, None)
+        if stream_state is None or self._loop is None:
+            return
+        asyncio.run_coroutine_threadsafe(
+            self._close_stream(stream_state), self._loop
+        )
+
     def publish(
         self, stream_id: str, packet: bytes, *, scheduled_at: float
     ) -> concurrent.futures.Future[dict[str, float]] | None:
@@ -245,6 +256,19 @@ class _FrameStreamServer:
             "stream_queue_time_ms": (started_at - scheduled_at) * 1000.0,
             "stream_send_time_ms": (finished_at - started_at) * 1000.0,
         }
+
+    async def _close_stream(self, stream_state: _FrameStreamState) -> None:
+        """Close all websocket clients associated with a stream."""
+        senders = list(stream_state.senders.values())
+        websockets = list(stream_state.senders.keys())
+        stream_state.latest_packet = None
+        stream_state.senders.clear()
+        for websocket in websockets:
+            with contextlib.suppress(Exception):
+                await websocket.close(code=1001)
+        for sender in senders:
+            with contextlib.suppress(Exception):
+                await sender.stop()
 
 
 _FRAME_STREAM_SERVER: _FrameStreamServer | None = None
@@ -577,6 +601,7 @@ class ViewerState:
     _show_origin_callback: Callable[[bool], None] | None = None
     _show_stats_callback: Callable[[bool], None] | None = None
     _origin_callback: Callable[[float, float, float], None] | None = None
+    _active_marimo_viewer_ref: weakref.ReferenceType[MarimoViewer] | None = None
 
     def __init__(
         self,
@@ -958,6 +983,7 @@ class _LatestOnlyRenderer:
         self._pending_state: CameraState | None = None
         self._pending_interaction_active = False
         self._pending_requested_at = 0.0
+        self._closed = False
         self._worker = threading.Thread(target=self._run, daemon=True)
         self._worker.start()
 
@@ -966,6 +992,8 @@ class _LatestOnlyRenderer:
     ) -> None:
         """Request a render for the most recent camera state."""
         with self._condition:
+            if self._closed:
+                return
             self._latest_revision = revision
             self._pending_revision = revision
             self._pending_state = camera_state
@@ -974,11 +1002,21 @@ class _LatestOnlyRenderer:
             self._set_rendering(True)
             self._condition.notify()
 
+    def close(self) -> None:
+        """Stop the background render worker."""
+        with self._condition:
+            self._closed = True
+            self._pending_state = None
+            self._condition.notify_all()
+        self._worker.join(timeout=1.0)
+
     def _run(self) -> None:
         while True:
             with self._condition:
-                while self._pending_state is None:
+                while self._pending_state is None and not self._closed:
                     self._condition.wait()
+                if self._closed:
+                    return
                 revision = self._pending_revision
                 camera_state = self._pending_state
                 interaction_active = self._pending_interaction_active
@@ -1151,11 +1189,13 @@ class MarimoViewer(_StableMarimoAnyWidget):
         self._state = state
         self._stream_server = _get_frame_stream_server()
         self._stream_path = anywidget_instance.stream_path
+        self._stream_id = self._stream_path.removeprefix("/streams/")
         self._last_debug_sample_at: float | None = None
         self._smoothed_debug_metrics: dict[str, float] = {}
         self._render_frame_timestamps: list[float] = []
         self._render_completion_condition = threading.Condition()
         self._completed_revisions: dict[int, Exception | None] = {}
+        self._closed = False
         try:
             self._main_loop: asyncio.AbstractEventLoop | None = (
                 asyncio.get_running_loop()
@@ -1192,6 +1232,55 @@ class MarimoViewer(_StableMarimoAnyWidget):
             self._state._show_stats_callback = self.set_show_stats
             self._state._origin_callback = self.set_origin
         self.rerender()
+
+    def close(self) -> None:
+        """Release background resources held by this viewer instance."""
+        if self._closed:
+            return
+        self._closed = True
+        self.widget.unobserve(
+            self._on_camera_revision_change, names=["_camera_revision"]
+        )
+        self.widget.unobserve(
+            self._on_camera_state_json_change, names=["camera_state_json"]
+        )
+        self.widget.unobserve(
+            self._on_last_click_json_change, names=["last_click_json"]
+        )
+        self.widget.unobserve(self._on_show_axes_change, names=["show_axes"])
+        self.widget.unobserve(
+            self._on_show_horizon_change, names=["show_horizon"]
+        )
+        self.widget.unobserve(
+            self._on_show_origin_change, names=["show_origin"]
+        )
+        self.widget.unobserve(self._on_show_stats_change, names=["show_stats"])
+        if self._state is not None:
+            self._clear_state_callback("_reset_camera_callback")
+            self._clear_state_callback("_viewer_rotation_callback")
+            self._clear_state_callback("_show_axes_callback")
+            self._clear_state_callback("_show_horizon_callback")
+            self._clear_state_callback("_show_origin_callback")
+            self._clear_state_callback("_show_stats_callback")
+            self._clear_state_callback("_origin_callback")
+            active_ref = self._state._active_marimo_viewer_ref
+            active_viewer = None if active_ref is None else active_ref()
+            if active_viewer is self:
+                self._state._active_marimo_viewer_ref = None
+        self._renderer.close()
+        self._stream_server.unregister_stream(self._stream_id)
+
+    def _clear_state_callback(self, attribute_name: str) -> None:
+        """Clear a ViewerState callback only when it points at this viewer."""
+        if self._state is None:
+            return
+        callback = getattr(self._state, attribute_name)
+        if getattr(callback, "__self__", None) is self:
+            setattr(self._state, attribute_name, None)
+
+    def __del__(self) -> None:
+        with contextlib.suppress(Exception):
+            self.close()
 
     def _update_smoothed_debug_metrics(
         self, **samples: float
@@ -1745,6 +1834,14 @@ def marimo_viewer(
     elif initial_view is not None:
         state.set_camera(initial_view)
 
+    existing_viewer = (
+        None
+        if state._active_marimo_viewer_ref is None
+        else state._active_marimo_viewer_ref()
+    )
+    if existing_viewer is not None:
+        existing_viewer.close()
+
     resolved_camera_state = state.camera_state
     stream_server = _get_frame_stream_server()
     stream_id, stream_token = stream_server.register_stream()
@@ -1767,7 +1864,7 @@ def marimo_viewer(
     )
     if state.last_click is not None:
         anywidget_instance.last_click_json = state.last_click.to_json()
-    return MarimoViewer(
+    viewer = MarimoViewer(
         anywidget_instance,
         render_fn=render_fn,
         interactive_quality=state.interactive_quality,
@@ -1777,6 +1874,8 @@ def marimo_viewer(
         state=state,
         raise_on_error=state.raise_on_error,
     )
+    state._active_marimo_viewer_ref = weakref.ref(viewer)
+    return viewer
 
 
 NativeViewerState = ViewerState

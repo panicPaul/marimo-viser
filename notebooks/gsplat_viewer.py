@@ -96,8 +96,13 @@ def _(viewer_state):
 
 @app.cell
 def _():
+    from marimo_3dv.ops.gs import _prepare_splat_render_data
+
     gui_pipeline = (
-        GuiPipeline(allow_prepared_copy=True)
+        GuiPipeline(
+            allow_prepared_copy=True,
+            prepare_copy_fn=_prepare_splat_render_data,
+        )
         # .pipe(max_sh_degree_op())
         # .pipe(filter_opacity_op())
         # .pipe(filter_size_op())

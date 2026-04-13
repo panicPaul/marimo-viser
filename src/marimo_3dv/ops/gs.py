@@ -186,6 +186,7 @@ def max_sh_degree_op(default_degree: int = 3) -> GuiOp[SplatRenderData]:
         default_config=MaxShDegreeConfig(max_sh_degree=default_degree),
         stage="prepare_render",
         hook=_max_sh_degree_hook,
+        mutates_render_data=True,
         requires_prepared_copy=True,
     )
 
@@ -236,6 +237,7 @@ def filter_opacity_op(
         default_config=FilterOpacityConfig(opacity_threshold=default_threshold),
         stage="prepare_render",
         hook=_filter_opacity_hook,
+        mutates_render_data=True,
         requires_prepared_copy=True,
     )
 
@@ -284,6 +286,7 @@ def filter_size_op(
         default_config=FilterSizeConfig(max_log_extent=default_max_log_extent),
         stage="prepare_render",
         hook=_filter_size_hook,
+        mutates_render_data=True,
         requires_prepared_copy=True,
     )
 

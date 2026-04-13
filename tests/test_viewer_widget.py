@@ -409,6 +409,7 @@ def test_marimo_viewer_reuses_explicit_state_across_reruns() -> None:
     assert second_viewer.get_camera_state().width == 32
     assert second_viewer.get_camera_state().height == 24
     assert second_viewer.get_camera_state().fov_degrees == 45.0
+    assert first_viewer._closed is True
 
 
 def test_viewer_state_can_reset_camera_to_initial_value() -> None:
@@ -615,3 +616,18 @@ def test_viewer_state_accepts_none_interactive_max_side() -> None:
     )
 
     assert viewer is not None
+
+
+def test_latest_only_renderer_close_stops_worker() -> None:
+    renderer = _LatestOnlyRenderer(
+        render_fn=lambda camera_state: np.zeros(
+            (camera_state.height, camera_state.width, 3), dtype=np.uint8
+        ),
+        publish_frame=lambda *args: None,
+        publish_error=lambda revision, error, message: None,
+        set_rendering=lambda value: None,
+    )
+
+    renderer.close()
+
+    assert not renderer._worker.is_alive()

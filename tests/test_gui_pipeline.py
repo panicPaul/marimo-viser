@@ -135,11 +135,12 @@ def test_prepared_copy_ops_are_included_when_opted_in() -> None:
         default_config=CopyConfig(),
         stage="prepare_render",
         hook=lambda data, cfg, ctx, rs: data,
+        mutates_render_data=True,
         requires_prepared_copy=True,
     )
 
     result = (
-        GuiPipeline(allow_prepared_copy=True)
+        GuiPipeline(allow_prepared_copy=True, prepare_copy_fn=lambda data: data)
         .pipe(copy_op)
         .build(render_data=None, viewer_state=_make_viewer_state())
     )
@@ -255,6 +256,63 @@ def test_runtime_state_persists_across_renders():
     assert result.runtime_state["counter"].count == 3
 
 
+def test_prepare_cache_releases_previous_copy_before_rebuild() -> None:
+    class CopyConfig(BaseModel):
+        threshold: int = 1
+
+    class Trackable:
+        pass
+
+    prepared_values: list[Trackable] = []
+    released = False
+
+    def hook(data, config, context, runtime_state):
+        del data, context, runtime_state
+        value = Trackable()
+        prepared_values.append(value)
+        return value
+
+    def backend_fn(camera_state, render_data):
+        del camera_state
+        nonlocal released
+        if len(prepared_values) >= 2 and render_data is prepared_values[1]:
+            released = (
+                prepared_values[0]
+                is not result._pipeline_state.prepared_render_data
+            )
+        return RenderResult(image=_dummy_image(), metadata={})
+
+    op = GuiOp(
+        name="copy_op",
+        config_model=CopyConfig,
+        default_config=CopyConfig(),
+        stage="prepare_render",
+        hook=hook,
+        mutates_render_data=True,
+        requires_prepared_copy=True,
+    )
+    result = (
+        GuiPipeline(
+            allow_prepared_copy=True,
+            prepare_copy_fn=lambda data: data,
+        )
+        .pipe(op)
+        .build(render_data=[], viewer_state=_make_viewer_state())
+    )
+
+    from marimo_3dv.viewer.widget import CameraState
+
+    render_fn = result.bind(result.default_config, backend_fn=backend_fn)
+    render_fn(CameraState.default())
+
+    updated_config = result.config_model(threshold=2)
+    render_fn = result.bind(updated_config, backend_fn=backend_fn)
+    render_fn(CameraState.default())
+
+    assert len(prepared_values) == 2
+    assert released is True
+
+
 def test_viewer_context_carries_viewer_state():
     captured: list[ViewerContext] = []
 
@@ -317,6 +375,85 @@ def test_prepare_render_can_modify_render_data():
     render_fn(cam)
 
     assert received_data[0] == ["modified"]
+
+
+def test_mutating_prepare_ops_clone_once_before_pipeline() -> None:
+    clone_calls: list[int] = []
+    backend_inputs: list[list[str]] = []
+
+    def clone_render_data(render_data: list[str]) -> list[str]:
+        clone_calls.append(1)
+        return list(render_data)
+
+    def mutate_prepare_hook(render_data, config, context, runtime_state):
+        del config, context, runtime_state
+        render_data.append("mutated")
+        return render_data
+
+    def backend(camera_state, render_data):
+        del camera_state
+        backend_inputs.append(list(render_data))
+        return RenderResult(image=_dummy_image(), metadata={})
+
+    op = GuiOp(
+        name="mutator",
+        config_model=EmptyConfig,
+        default_config=EmptyConfig(),
+        stage="prepare_render",
+        hook=mutate_prepare_hook,
+        mutates_render_data=True,
+        requires_prepared_copy=True,
+    )
+    source_render_data: list[str] = []
+    result = (
+        GuiPipeline(
+            allow_prepared_copy=True,
+            prepare_copy_fn=clone_render_data,
+        )
+        .pipe(op)
+        .build(
+            render_data=source_render_data,
+            viewer_state=_make_viewer_state(),
+        )
+    )
+
+    from marimo_3dv.viewer.widget import CameraState
+
+    render_fn = result.bind(result.default_config, backend_fn=backend)
+    render_fn(CameraState.default())
+    render_fn(CameraState.default(width=640, height=360))
+
+    assert clone_calls == [1]
+    assert backend_inputs == [["mutated"], ["mutated"]]
+    assert source_render_data == []
+
+
+def test_mutating_prepare_ops_require_prepare_copy_fn() -> None:
+    op = GuiOp(
+        name="mutator",
+        config_model=EmptyConfig,
+        default_config=EmptyConfig(),
+        stage="prepare_render",
+        hook=lambda data, cfg, ctx, rs: data,
+        mutates_render_data=True,
+        requires_prepared_copy=True,
+    )
+    result = (
+        GuiPipeline(allow_prepared_copy=True)
+        .pipe(op)
+        .build(render_data=[], viewer_state=_make_viewer_state())
+    )
+
+    def backend(camera_state, render_data):
+        del camera_state, render_data
+        return RenderResult(image=_dummy_image(), metadata={})
+
+    from marimo_3dv.viewer.widget import CameraState
+
+    render_fn = result.bind(result.default_config, backend_fn=backend)
+
+    with pytest.raises(ValueError, match="prepare_copy_fn"):
+        render_fn(CameraState.default())
 
 
 def test_prepare_render_is_cached_across_camera_renders() -> None:

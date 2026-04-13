@@ -71,6 +71,9 @@ class DesktopViewer:
         self._frame_lock = threading.Lock()
         self._running = False
         self._input = _InputState()
+        self._frame_texture: pyglet.image.Texture | None = None
+        self._frame_sprite: pyglet.sprite.Sprite | None = None
+        self._frame_texture_size: tuple[int, int] | None = None
 
         # Track render timing for stats.
         self._last_render_ms: float = 0.0
@@ -136,18 +139,48 @@ class DesktopViewer:
     # ------------------------------------------------------------------
 
     def _draw_frame(self, frame: np.ndarray) -> None:
-        """Upload frame as ImageData and blit scaled to window."""
+        """Upload frame into a reusable texture and draw it scaled."""
         height, width = frame.shape[:2]
         flipped = np.ascontiguousarray(frame[::-1])
         image_data = pyglet.image.ImageData(
             width, height, "RGB", flipped.tobytes()
         )
-        texture = image_data.get_texture()
+        texture = self._ensure_frame_texture(width=width, height=height)
+        texture.blit_into(image_data, 0, 0, 0)
         win_w, win_h = self._get_framebuffer_size()
-        sprite = pyglet.sprite.Sprite(texture, x=0, y=0)
-        sprite.scale_x = win_w / sprite.width
-        sprite.scale_y = win_h / sprite.height
-        sprite.draw()
+        assert self._frame_sprite is not None
+        self._frame_sprite.scale_x = win_w / texture.width
+        self._frame_sprite.scale_y = win_h / texture.height
+        self._frame_sprite.draw()
+
+    def _ensure_frame_texture(
+        self, *, width: int, height: int
+    ) -> pyglet.image.Texture:
+        """Return a reusable RGB texture sized for the current frame."""
+        texture_size = (width, height)
+        if (
+            self._frame_texture is not None
+            and self._frame_texture_size == texture_size
+        ):
+            return self._frame_texture
+        self._release_frame_texture()
+        texture = pyglet.image.Texture.create(
+            width=width,
+            height=height,
+            fmt=pyglet.gl.GL_RGB,
+        )
+        self._frame_texture = texture
+        self._frame_texture_size = texture_size
+        self._frame_sprite = pyglet.sprite.Sprite(texture, x=0, y=0)
+        return texture
+
+    def _release_frame_texture(self) -> None:
+        """Release the current GPU texture and sprite, if any."""
+        self._frame_sprite = None
+        if self._frame_texture is not None:
+            self._frame_texture.delete()
+            self._frame_texture = None
+        self._frame_texture_size = None
 
     # ------------------------------------------------------------------
     # Camera math
@@ -534,6 +567,7 @@ class DesktopViewer:
         pyglet.app.run()
         self._running = False
         render_thread.join(timeout=2.0)
+        self._release_frame_texture()
         if self._render_error is not None:
             raise RuntimeError(
                 "Desktop viewer render loop failed.\n"

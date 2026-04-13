@@ -2,13 +2,17 @@
 
 from marimo_3dv.gui.pydantic import form_gui, json_gui
 from marimo_3dv.ops.gs import (
+    CompiledGsRenderView,
     FilterOpacityConfig,
     FilterSizeConfig,
+    GsRenderView,
     MaxShDegreeConfig,
     ShowDistributionConfig,
     SplatRenderData,
+    compile_gs_render_view,
     filter_opacity_op,
     filter_size_op,
+    gs_render_view,
     max_sh_degree_op,
     show_distribution_op,
 )
@@ -26,10 +30,16 @@ from marimo_3dv.ops.overlay import PaintRayConfig, paint_ray_op
 from marimo_3dv.ops.setup import camera_similarity_op, pca_alignment_op
 from marimo_3dv.pipeline.context import ViewerContext
 from marimo_3dv.pipeline.gui import (
-    GuiOp,
-    GuiPipeline,
-    GuiPipelineResult,
+    AbstractRenderView,
+    EffectNode,
+    EmptyConfig,
+    PipelineGroup,
+    RenderNode,
     RenderResult,
+    ViewerPipeline,
+    ViewerPipelineResult,
+    effect_node,
+    render_node,
 )
 from marimo_3dv.pipeline.setup import SetupPipeline
 from marimo_3dv.viewer import (
@@ -41,15 +51,19 @@ from marimo_3dv.viewer import (
 )
 
 __all__ = [
+    "AbstractRenderView",
     "CameraState",
+    "CompiledGsRenderView",
+    "EffectNode",
+    "EmptyConfig",
     "FilterOpacityConfig",
     "FilterSizeConfig",
-    "GuiOp",
-    "GuiPipeline",
-    "GuiPipelineResult",
+    "GsRenderView",
     "MarimoViewer",
     "MaxShDegreeConfig",
     "PaintRayConfig",
+    "PipelineGroup",
+    "RenderNode",
     "RenderResult",
     "SetupPipeline",
     "ShowDistributionConfig",
@@ -57,6 +71,8 @@ __all__ = [
     "Viewer",
     "ViewerClick",
     "ViewerContext",
+    "ViewerPipeline",
+    "ViewerPipelineResult",
     "ViewerState",
     "apply_rotation_to_quaternions",
     "apply_rotation_to_sh_coefficients",
@@ -64,15 +80,19 @@ __all__ = [
     "apply_to_cameras",
     "apply_to_points",
     "camera_similarity_op",
+    "compile_gs_render_view",
     "compose_transforms",
+    "effect_node",
     "filter_opacity_op",
     "filter_size_op",
     "form_gui",
+    "gs_render_view",
     "json_gui",
     "max_sh_degree_op",
     "paint_ray_op",
     "pca_alignment_op",
     "pca_transform_from_points",
+    "render_node",
     "show_distribution_op",
     "similarity_from_cameras",
 ]

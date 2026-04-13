@@ -54,12 +54,11 @@ def test_project_ray_back_to_approx_same_pixel():
     assert abs(projected[1] - py) <= 1
 
 
-def test_paint_ray_op_returns_guiop():
-    from marimo_3dv.pipeline.gui import GuiOp
+def test_paint_ray_op_returns_effect_node():
+    from marimo_3dv.pipeline.gui import EffectNode
 
     op = paint_ray_op()
-    assert isinstance(op, GuiOp)
-    assert op.stage == "image_overlay"
+    assert isinstance(op, EffectNode)
     assert op.name == "paint_ray"
 
 
@@ -83,7 +82,7 @@ def test_paint_ray_stores_ray_on_click():
     result = RenderResult(image=image)
 
     op = paint_ray_op()
-    op.hook(result, config, context, runtime_state)
+    op.apply(result, config, context, runtime_state)
 
     assert len(runtime_state.rays) == 1
 
@@ -110,7 +109,7 @@ def test_paint_ray_respects_max_rays():
         viewer_state.last_click = click
         context = ViewerContext(viewer_state=viewer_state, last_click=click)
         result = RenderResult(image=image.copy())
-        paint_ray_op().hook(result, config, context, runtime_state)
+        paint_ray_op().apply(result, config, context, runtime_state)
 
     assert len(runtime_state.rays) == 3
 
@@ -132,6 +131,6 @@ def test_paint_ray_disabled_returns_unchanged():
     image = np.zeros((cam.height, cam.width, 3), dtype=np.uint8)
     result = RenderResult(image=image)
 
-    returned = paint_ray_op().hook(result, config, context, runtime_state)
+    returned = paint_ray_op().apply(result, config, context, runtime_state)
     assert returned is result
     assert len(runtime_state.rays) == 0

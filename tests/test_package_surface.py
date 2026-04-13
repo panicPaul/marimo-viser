@@ -65,20 +65,30 @@ def test_viewer_runs_desktop_backend_outside_notebook(
 
 def test_pipeline_imports_work():
     from marimo_3dv import (
-        GuiOp,
-        GuiPipeline,
-        GuiPipelineResult,
+        AbstractRenderView,
+        EffectNode,
+        PipelineGroup,
+        RenderNode,
         RenderResult,
         SetupPipeline,
         ViewerContext,
+        ViewerPipeline,
+        ViewerPipelineResult,
+        effect_node,
+        render_node,
     )
 
-    assert GuiOp is not None
-    assert GuiPipeline is not None
-    assert GuiPipelineResult is not None
+    assert AbstractRenderView is not None
+    assert EffectNode is not None
+    assert PipelineGroup is not None
+    assert RenderNode is not None
     assert RenderResult is not None
     assert SetupPipeline is not None
+    assert ViewerPipeline is not None
+    assert ViewerPipelineResult is not None
     assert ViewerContext is not None
+    assert effect_node is not None
+    assert render_node is not None
 
 
 def test_gs_pipe_imports_work():

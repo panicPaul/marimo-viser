@@ -1,406 +1,579 @@
-"""Typed GUI pipeline for composing render ops around a single backend render.
-
-Stage model (exactly one backend render per frame):
-
-1. ``prepare_render``   — modify backend inputs before the backend renders.
-2. ``backend_render``   — the single actual scene render (owned by the caller).
-3. ``post_render_metadata`` — consume backend outputs beyond the final image.
-4. ``image_overlay``    — draw on top of the already-rendered image.
-
-Each GuiOp hooks into exactly one stage. All ops compose around the single
-backend render; no op may trigger a second backend render.
-"""
+"""Declarative viewer pipeline primitives."""
 
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Generic, Literal, TypeVar
+from typing import Any, Generic, TypeVar
 
 import numpy as np
-from pydantic import BaseModel
+from pydantic import BaseModel, create_model
 
 from marimo_3dv.pipeline.context import ViewerContext
 from marimo_3dv.viewer.widget import CameraState, ViewerState
 
-RenderDataT = TypeVar("RenderDataT")
+SceneT = TypeVar("SceneT")
+RenderViewT = TypeVar("RenderViewT", bound="AbstractRenderView[Any]")
+CompiledViewT = TypeVar("CompiledViewT")
+StateT = TypeVar("StateT")
 
-PipelineStage = Literal[
-    "prepare_render",
-    "post_render_metadata",
-    "image_overlay",
-]
+
+@dataclass(frozen=True)
+class AbstractRenderView(Generic[SceneT]):
+    """Backend-neutral immutable render view."""
+
+    source_scene: SceneT
+    backend_key: str = "generic"
+    capabilities: frozenset[str] = frozenset()
+    extensions: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass
 class RenderResult:
-    """Structured output from a backend render.
-
-    Attributes:
-        image: Final rendered image as uint8 (H, W, 3) numpy array.
-        metadata: Backend-specific extras (e.g. gsplat projected means,
-            visibility masks, depth buffers).
-    """
+    """Structured output from a backend render."""
 
     image: np.ndarray
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
-@dataclass
-class GuiOp(Generic[RenderDataT]):
-    """A single composable unit in a GuiPipeline.
+class EmptyConfig(BaseModel):
+    """Empty config model used by nodes without controls."""
 
-    Each op contributes a config submodel, optional runtime state, and a
-    hook that fires at one pipeline stage.
 
-    Attributes:
-        name: Unique name identifying this op in the pipeline.
-        config_model: Pydantic model class for this op's configuration.
-        default_config: Default instance of ``config_model``.
-        stage: Which pipeline stage this op hooks into.
-        hook: The op's stage callback (see GuiPipeline.build for signatures).
-        runtime_state_factory: Optional factory returning fresh mutable state
-            for this op. Called once per ``GuiPipeline.build()`` call.
-        mutates_render_data: Whether this op mutates prepare-stage render
-            data in place. When any active prepare op sets this flag, the
-            pipeline clones the source render data once via
-            ``prepare_copy_fn`` before running the prepare stage.
-        requires_prepared_copy: Whether this op requires the pipeline to be
-            configured with prepare-copy support. Pipelines exclude these ops
-            unless ``allow_prepared_copy=True`` is set explicitly.
-    """
+_EMPTY_CONFIG = EmptyConfig()
+
+
+@dataclass(frozen=True)
+class RenderNode(Generic[RenderViewT]):
+    """Pure render-view transform."""
 
     name: str
-    config_model: type[BaseModel]
-    default_config: BaseModel
-    stage: PipelineStage
-    hook: Callable[..., Any]
-    runtime_state_factory: Callable[[], Any] | None = None
-    mutates_render_data: bool = False
-    requires_prepared_copy: bool = False
+    apply: Callable[[RenderViewT, BaseModel, ViewerContext], RenderViewT]
+    config_model: type[BaseModel] | None = None
+    default_config: BaseModel | None = None
 
 
-class _EmptyConfig(BaseModel):
-    """Empty pydantic model for ops that require no configuration."""
+@dataclass(frozen=True)
+class EffectNode(Generic[CompiledViewT, StateT]):
+    """Post-render effect with optional runtime state."""
+
+    name: str
+    apply: Callable[
+        [RenderResult, BaseModel, ViewerContext, StateT], RenderResult
+    ]
+    config_model: type[BaseModel] | None = None
+    default_config: BaseModel | None = None
+    state_factory: Callable[[], StateT] | None = None
 
 
-_EMPTY_DEFAULT = _EmptyConfig()
+@dataclass(frozen=True)
+class PipelineGroup:
+    """Named group of nodes used to build nested config trees."""
+
+    name: str
+    items: tuple[PipelineItem, ...]
+
+    def __init__(self, name: str, *items: PipelineItem) -> None:
+        object.__setattr__(self, "name", name)
+        object.__setattr__(self, "items", tuple(items))
+
+
+PipelineItem = RenderNode[Any] | EffectNode[Any, Any] | PipelineGroup
+
+
+def render_node(
+    *,
+    name: str,
+    apply: Callable[[RenderViewT, BaseModel, ViewerContext], RenderViewT],
+    config_model: type[BaseModel] | None = None,
+    default_config: BaseModel | None = None,
+) -> RenderNode[RenderViewT]:
+    """Create a render-view node."""
+    if (config_model is None) != (default_config is None):
+        raise ValueError(
+            "Render nodes must provide both config_model and default_config "
+            "or neither."
+        )
+    return RenderNode(
+        name=name,
+        apply=apply,
+        config_model=config_model,
+        default_config=default_config,
+    )
+
+
+def effect_node(
+    *,
+    name: str,
+    apply: Callable[
+        [RenderResult, BaseModel, ViewerContext, StateT], RenderResult
+    ],
+    config_model: type[BaseModel] | None = None,
+    default_config: BaseModel | None = None,
+    state_factory: Callable[[], StateT] | None = None,
+) -> EffectNode[Any, StateT]:
+    """Create a post-render effect node."""
+    if (config_model is None) != (default_config is None):
+        raise ValueError(
+            "Effect nodes must provide both config_model and default_config "
+            "or neither."
+        )
+    return EffectNode(
+        name=name,
+        apply=apply,
+        config_model=config_model,
+        default_config=default_config,
+        state_factory=state_factory,
+    )
+
+
+@dataclass(frozen=True)
+class _ConfiguredRenderNode(Generic[RenderViewT]):
+    node: RenderNode[RenderViewT]
+    config_path: tuple[str, ...] | None
+    config_model: type[BaseModel] | None = None
+    flattened_fields: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class _ConfiguredEffectNode(Generic[StateT]):
+    node: EffectNode[Any, StateT]
+    config_path: tuple[str, ...] | None
+    config_model: type[BaseModel] | None = None
+    flattened_fields: tuple[str, ...] = ()
 
 
 @dataclass
-class _PipelineRuntimeState(Generic[RenderDataT]):
-    """Collected runtime state for all ops in a built pipeline."""
-
-    ops: list[GuiOp[RenderDataT]]
-    op_configs: dict[str, type[BaseModel]]
-    op_runtime_states: dict[str, Any]
-    render_data: RenderDataT
+class _PipelineRuntimeState(Generic[SceneT, RenderViewT, CompiledViewT]):
+    render_nodes: list[_ConfiguredRenderNode[RenderViewT]]
+    effect_nodes: list[_ConfiguredEffectNode[Any]]
+    effect_states: dict[str, Any]
+    source_scene: SceneT
     viewer_state: ViewerState
-    prepare_copy_fn: Callable[[RenderDataT], RenderDataT] | None = None
-    prepared_render_data: RenderDataT | None = None
-    prepare_cache_key: str | None = None
+    view_factory: Callable[[SceneT], RenderViewT]
+    compile_view: Callable[[RenderViewT], CompiledViewT]
+    compiled_view: CompiledViewT | None = None
+    compiled_view_key: str | None = None
 
 
 @dataclass
-class GuiPipelineResult(Generic[RenderDataT]):
-    """Result of building a GuiPipeline.
-
-    Exposes a combined Pydantic config model, default config, and a
-    ``render_fn`` that executes all pipeline stages around a caller-supplied
-    backend render function.
-
-    Attributes:
-        config_model: Combined Pydantic model merging all op configs.
-        default_config: Combined default config instance.
-        runtime_state: Mutable per-op runtime state keyed by op name.
-        render_fn: Full pipeline render function
-            ``(CameraState, combined_config, ViewerContext,
-               backend_fn) -> RenderResult``.
-    """
+class ViewerPipelineResult(Generic[SceneT, RenderViewT, CompiledViewT]):
+    """Built viewer pipeline ready to bind to a backend renderer."""
 
     config_model: type[BaseModel]
     default_config: BaseModel
     runtime_state: dict[str, Any]
-    _pipeline_state: _PipelineRuntimeState[RenderDataT]
+    _pipeline_state: _PipelineRuntimeState[SceneT, RenderViewT, CompiledViewT]
 
     def bind(
         self,
         config: BaseModel,
-        backend_fn: Callable[[CameraState, RenderDataT], RenderResult],
+        backend_fn: Callable[[CameraState, CompiledViewT], RenderResult],
     ) -> Callable[[CameraState], RenderResult]:
-        """Bind a config and backend to produce a single-argument render callable.
-
-        The returned callable accepts only a ``CameraState`` and runs the full
-        pipeline: prepare_render → backend_render → post_render_metadata →
-        image_overlay.
-
-        Args:
-            config: Combined pipeline config (instance of ``config_model``).
-            backend_fn: Callable that performs the actual scene render and
-                returns a ``RenderResult``.
-
-        Returns:
-            A ``(CameraState) -> RenderResult`` callable ready for the viewer.
-        """
+        """Bind a config and backend renderer to a single render function."""
 
         def render(camera_state: CameraState) -> RenderResult:
             viewer_context = ViewerContext(
                 viewer_state=self._pipeline_state.viewer_state,
                 last_click=self._pipeline_state.viewer_state.last_click,
             )
-            return _run_pipeline(
-                camera_state=camera_state,
+            compiled_view = _get_compiled_view(
                 config=config,
                 context=viewer_context,
-                backend_fn=backend_fn,
                 pipeline_state=self._pipeline_state,
             )
+            result = backend_fn(camera_state, compiled_view)
+            for configured_effect in self._pipeline_state.effect_nodes:
+                effect_config = _config_for_node(
+                    config,
+                    configured_effect.config_path,
+                    configured_effect.config_model,
+                    configured_effect.flattened_fields,
+                )
+                effect_state = self._pipeline_state.effect_states.get(
+                    configured_effect.node.name
+                )
+                result = configured_effect.node.apply(
+                    result,
+                    effect_config,
+                    viewer_context,
+                    effect_state,
+                )
+            return result
 
         return render
 
 
-def _run_pipeline(
+def _get_compiled_view(
     *,
-    camera_state: CameraState,
     config: BaseModel,
     context: ViewerContext,
-    backend_fn: Callable[[CameraState, RenderDataT], RenderResult],
-    pipeline_state: _PipelineRuntimeState[RenderDataT],
-) -> RenderResult:
-    """Execute all pipeline stages for one frame.
-
-    Exactly one call to ``backend_fn`` occurs per invocation.
-    """
-    config_dict = config.model_dump()
-    render_data = _get_prepared_render_data(
-        context=context,
-        config_dict=config_dict,
-        pipeline_state=pipeline_state,
+    pipeline_state: _PipelineRuntimeState[SceneT, RenderViewT, CompiledViewT],
+) -> CompiledViewT:
+    render_config_payload = _render_config_payload(
+        config,
+        pipeline_state.render_nodes,
     )
-
-    # Stage 2: backend_render — exactly once
-    result = backend_fn(camera_state, render_data)
-
-    # Stage 3: post_render_metadata — ops consume backend outputs
-    for op in pipeline_state.ops:
-        if op.stage != "post_render_metadata":
-            continue
-        op_config = _extract_op_config(op, config_dict)
-        op_runtime = pipeline_state.op_runtime_states.get(op.name)
-        result = op.hook(result, op_config, context, op_runtime)
-
-    # Stage 4: image_overlay — ops draw on top of the rendered image
-    for op in pipeline_state.ops:
-        if op.stage != "image_overlay":
-            continue
-        op_config = _extract_op_config(op, config_dict)
-        op_runtime = pipeline_state.op_runtime_states.get(op.name)
-        result = op.hook(result, op_config, context, op_runtime)
-
-    return result
-
-
-def _get_prepared_render_data(
-    *,
-    context: ViewerContext,
-    config_dict: dict[str, Any],
-    pipeline_state: _PipelineRuntimeState[RenderDataT],
-) -> RenderDataT:
-    """Return cached prepare-stage output, recomputing only on config changes."""
-    prepare_ops = [
-        op for op in pipeline_state.ops if op.stage == "prepare_render"
-    ]
-    if not prepare_ops:
-        return pipeline_state.render_data
-    has_mutating_prepare_op = any(op.mutates_render_data for op in prepare_ops)
-    if has_mutating_prepare_op and pipeline_state.prepare_copy_fn is None:
-        raise ValueError(
-            "This pipeline includes prepare_render ops that mutate render "
-            "data, but no prepare_copy_fn was configured."
-        )
-
-    prepare_configs = {
-        op.name: _extract_op_config(op, config_dict).model_dump(mode="json")
-        for op in prepare_ops
-    }
-    prepare_cache_key = json.dumps(
+    compiled_key = json.dumps(
         {
-            "render_data_id": id(pipeline_state.render_data),
-            "prepare_configs": prepare_configs,
+            "scene_id": id(pipeline_state.source_scene),
+            "render_config": render_config_payload,
         },
         sort_keys=True,
         default=str,
     )
     if (
-        pipeline_state.prepared_render_data is not None
-        and pipeline_state.prepare_cache_key == prepare_cache_key
+        pipeline_state.compiled_view is not None
+        and pipeline_state.compiled_view_key == compiled_key
     ):
-        return pipeline_state.prepared_render_data
+        return pipeline_state.compiled_view
 
-    # Drop the previous prepared copy before building the next one so large
-    # tensor clones can be reclaimed or reused by the allocator immediately.
-    pipeline_state.prepared_render_data = None
-    pipeline_state.prepare_cache_key = None
-
-    prepared_render_data = pipeline_state.render_data
-    if has_mutating_prepare_op:
-        prepared_render_data = pipeline_state.prepare_copy_fn(
-            prepared_render_data
+    render_view = pipeline_state.view_factory(pipeline_state.source_scene)
+    for configured_node in pipeline_state.render_nodes:
+        node_config = _config_for_node(
+            config,
+            configured_node.config_path,
+            configured_node.config_model,
+            configured_node.flattened_fields,
         )
-    for op in prepare_ops:
-        op_config = _extract_op_config(op, config_dict)
-        op_runtime = pipeline_state.op_runtime_states.get(op.name)
-        prepared_render_data = op.hook(
-            prepared_render_data,
-            op_config,
+        render_view = configured_node.node.apply(
+            render_view,
+            node_config,
             context,
-            op_runtime,
         )
 
-    pipeline_state.prepared_render_data = prepared_render_data
-    pipeline_state.prepare_cache_key = prepare_cache_key
-    return prepared_render_data
+    compiled_view = pipeline_state.compile_view(render_view)
+    pipeline_state.compiled_view = compiled_view
+    pipeline_state.compiled_view_key = compiled_key
+    return compiled_view
 
 
-def _extract_op_config(
-    op: GuiOp[Any], config_dict: dict[str, Any]
+def _render_config_payload(
+    config: BaseModel, render_nodes: Sequence[_ConfiguredRenderNode[Any]]
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    for configured_node in render_nodes:
+        if configured_node.config_model is None:
+            continue
+        payload_key = ".".join(configured_node.config_path or ())
+        payload[payload_key] = _config_for_node(
+            config,
+            configured_node.config_path,
+            configured_node.config_model,
+            configured_node.flattened_fields,
+        ).model_dump(mode="json")
+    return payload
+
+
+def _config_for_path(
+    config: BaseModel, path: tuple[str, ...] | None
 ) -> BaseModel:
-    """Extract this op's config fields from the combined config dict."""
-    op_fields = set(op.config_model.model_fields)
-    op_data = {k: v for k, v in config_dict.items() if k in op_fields}
-    return op.config_model(**op_data)
+    if path is None:
+        return _EMPTY_CONFIG
+
+    value: Any = config
+    for part in path:
+        value = getattr(value, part)
+    if not isinstance(value, BaseModel):
+        raise TypeError(f"Expected BaseModel at config path {path!r}.")
+    return value
 
 
-def _build_combined_config_model(
-    ops: list[GuiOp[Any]],
-) -> tuple[type[BaseModel], BaseModel]:
-    """Merge all op config models into one flat Pydantic model.
-
-    Field names must be unique across all ops.
-
-    Args:
-        ops: List of GuiOps in the pipeline.
-
-    Returns:
-        ``(CombinedModel, default_instance)`` tuple.
-
-    Raises:
-        ValueError: If two ops define a field with the same name.
-    """
-    from pydantic import create_model
-
-    seen: dict[str, str] = {}
-    field_definitions: dict[str, Any] = {}
-    defaults: dict[str, Any] = {}
-
-    for op in ops:
-        op_defaults = op.default_config.model_dump()
-        for field_name, field_info in op.config_model.model_fields.items():
-            if field_name in seen:
-                raise ValueError(
-                    f"Field {field_name!r} is defined by both op "
-                    f"{seen[field_name]!r} and op {op.name!r}. "
-                    "All op config fields must have unique names."
-                )
-            seen[field_name] = op.name
-            field_definitions[field_name] = (
-                field_info.annotation,
-                field_info,
-            )
-            defaults[field_name] = op_defaults.get(field_name)
-
-    combined_model: type[BaseModel] = create_model(
-        "PipelineConfig", **field_definitions
+def _config_for_node(
+    config: BaseModel,
+    config_path: tuple[str, ...] | None,
+    config_model: type[BaseModel] | None,
+    flattened_fields: tuple[str, ...],
+) -> BaseModel:
+    if config_model is None:
+        return _EMPTY_CONFIG
+    if not flattened_fields:
+        return _config_for_path(config, config_path)
+    container = _config_for_path(config, config_path)
+    return config_model(
+        **{
+            field_name: getattr(container, field_name)
+            for field_name in flattened_fields
+        }
     )
-    default_instance = combined_model(**defaults)
-    return combined_model, default_instance
 
 
-class GuiPipeline(Generic[RenderDataT]):
-    """Typed GUI pipeline that composes render ops around a single backend render.
+@dataclass(frozen=True)
+class _ConfigEntry:
+    field_name: str
+    model: type[BaseModel]
+    default_value: BaseModel
 
-    Example::
 
-        pipeline = (
-            GuiPipeline()
-            .pipe(max_sh_degree_op())
-            .pipe(filter_opacity_op())
-            .pipe(paint_ray_op())
+def _build_group_config(
+    item: PipelineItem,
+    *,
+    path: tuple[str, ...],
+    render_nodes: list[_ConfiguredRenderNode[Any]],
+    effect_nodes: list[_ConfiguredEffectNode[Any]],
+) -> _ConfigEntry | None:
+    if isinstance(item, PipelineGroup):
+        group_fields: dict[str, tuple[Any, Any]] = {}
+        group_defaults: dict[str, Any] = {}
+        for child in item.items:
+            if isinstance(child, RenderNode):
+                if child.config_model is None or child.default_config is None:
+                    render_nodes.append(
+                        _ConfiguredRenderNode(node=child, config_path=None)
+                    )
+                    continue
+                child_defaults = child.default_config.model_dump()
+                flattened_fields = tuple(child.config_model.model_fields)
+                for (
+                    field_name,
+                    field_info,
+                ) in child.config_model.model_fields.items():
+                    if field_name in group_fields:
+                        raise ValueError(
+                            f"Duplicate config field {field_name!r} "
+                            f"inside group {item.name!r}."
+                        )
+                    group_fields[field_name] = (
+                        field_info.annotation,
+                        field_info,
+                    )
+                    group_defaults[field_name] = child_defaults.get(field_name)
+                render_nodes.append(
+                    _ConfiguredRenderNode(
+                        node=child,
+                        config_path=(*path, item.name),
+                        config_model=child.config_model,
+                        flattened_fields=flattened_fields,
+                    )
+                )
+                continue
+            if isinstance(child, EffectNode):
+                if child.config_model is None or child.default_config is None:
+                    effect_nodes.append(
+                        _ConfiguredEffectNode(node=child, config_path=None)
+                    )
+                    continue
+                child_defaults = child.default_config.model_dump()
+                flattened_fields = tuple(child.config_model.model_fields)
+                for (
+                    field_name,
+                    field_info,
+                ) in child.config_model.model_fields.items():
+                    if field_name in group_fields:
+                        raise ValueError(
+                            f"Duplicate config field {field_name!r} "
+                            f"inside group {item.name!r}."
+                        )
+                    group_fields[field_name] = (
+                        field_info.annotation,
+                        field_info,
+                    )
+                    group_defaults[field_name] = child_defaults.get(field_name)
+                effect_nodes.append(
+                    _ConfiguredEffectNode(
+                        node=child,
+                        config_path=(*path, item.name),
+                        config_model=child.config_model,
+                        flattened_fields=flattened_fields,
+                    )
+                )
+                continue
+            child_entry = _build_group_config(
+                child,
+                path=(*path, item.name),
+                render_nodes=render_nodes,
+                effect_nodes=effect_nodes,
+            )
+            if child_entry is None:
+                continue
+            if child_entry.field_name in group_fields:
+                raise ValueError(
+                    f"Duplicate config field {child_entry.field_name!r} "
+                    f"inside group {item.name!r}."
+                )
+            group_fields[child_entry.field_name] = (
+                child_entry.model,
+                child_entry.default_value,
+            )
+            group_defaults[child_entry.field_name] = child_entry.default_value
+
+        if not group_fields:
+            return None
+
+        group_model = create_model(
+            f"{_title_case(item.name)}ConfigGroup",
+            **group_fields,
         )
-        result = pipeline.build(render_data, viewer_state)
-        viewer = Viewer(
-            result.bind(config_gui.value, backend_fn=rasterize),
-            state=viewer_state,
+        return _ConfigEntry(
+            field_name=item.name,
+            model=group_model,
+            default_value=group_model(**group_defaults),
         )
-    """
+
+    if isinstance(item, RenderNode):
+        config_path = None if item.config_model is None else (*path, item.name)
+        render_nodes.append(
+            _ConfiguredRenderNode(
+                node=item,
+                config_path=config_path,
+                config_model=item.config_model,
+            )
+        )
+        if item.config_model is None or item.default_config is None:
+            return None
+        return _ConfigEntry(
+            field_name=item.name,
+            model=item.config_model,
+            default_value=item.default_config,
+        )
+
+    config_path = None if item.config_model is None else (*path, item.name)
+    effect_nodes.append(
+        _ConfiguredEffectNode(
+            node=item,
+            config_path=config_path,
+            config_model=item.config_model,
+        )
+    )
+    if item.config_model is None or item.default_config is None:
+        return None
+    return _ConfigEntry(
+        field_name=item.name,
+        model=item.config_model,
+        default_value=item.default_config,
+    )
+
+
+def _title_case(value: str) -> str:
+    return "".join(part.capitalize() for part in value.split("_"))
+
+
+def _build_config_model(
+    render_items: Sequence[PipelineItem],
+    effect_items: Sequence[PipelineItem],
+) -> tuple[
+    type[BaseModel],
+    BaseModel,
+    list[_ConfiguredRenderNode[Any]],
+    list[_ConfiguredEffectNode[Any]],
+]:
+    render_nodes: list[_ConfiguredRenderNode[Any]] = []
+    effect_nodes: list[_ConfiguredEffectNode[Any]] = []
+    top_level_fields: dict[str, tuple[type[BaseModel], BaseModel]] = {}
+
+    for item in (*render_items, *effect_items):
+        config_entry = _build_group_config(
+            item,
+            path=(),
+            render_nodes=render_nodes,
+            effect_nodes=effect_nodes,
+        )
+        if config_entry is None:
+            continue
+        if config_entry.field_name in top_level_fields:
+            raise ValueError(
+                f"Duplicate top-level config field {config_entry.field_name!r}."
+            )
+        top_level_fields[config_entry.field_name] = (
+            config_entry.model,
+            config_entry.default_value,
+        )
+
+    root_model = create_model("ViewerPipelineConfig", **top_level_fields)
+    defaults = {
+        field_name: default_value
+        for field_name, (_, default_value) in top_level_fields.items()
+    }
+    return root_model, root_model(**defaults), render_nodes, effect_nodes
+
+
+class ViewerPipeline(Generic[SceneT, RenderViewT, CompiledViewT]):
+    """Declarative pipeline for viewer render views and post-render effects."""
 
     def __init__(
         self,
         *,
-        allow_prepared_copy: bool = False,
-        prepare_copy_fn: Callable[[RenderDataT], RenderDataT] | None = None,
+        view_factory: Callable[[SceneT], RenderViewT],
+        compile_view: Callable[[RenderViewT], CompiledViewT] | None = None,
     ) -> None:
-        self._ops: list[GuiOp[RenderDataT]] = []
-        self._allow_prepared_copy = allow_prepared_copy
-        self._prepare_copy_fn = prepare_copy_fn
-
-    def pipe(self, op: GuiOp[RenderDataT]) -> GuiPipeline[RenderDataT]:
-        """Append a GuiOp and return a new pipeline.
-
-        Args:
-            op: The op to append.
-
-        Returns:
-            A new GuiPipeline with the op added.
-        """
-        next_pipeline: GuiPipeline[RenderDataT] = GuiPipeline(
-            allow_prepared_copy=self._allow_prepared_copy,
-            prepare_copy_fn=self._prepare_copy_fn,
+        self._view_factory = view_factory
+        self._compile_view = (
+            compile_view if compile_view is not None else lambda view: view  # type: ignore[return-value]
         )
-        next_pipeline._ops = [*self._ops, op]
+        self._render_items: list[PipelineItem] = []
+        self._effect_items: list[PipelineItem] = []
+
+    def render(
+        self, item: RenderNode[RenderViewT] | PipelineGroup
+    ) -> ViewerPipeline[SceneT, RenderViewT, CompiledViewT]:
+        """Return a new pipeline with a render-view item appended."""
+        next_pipeline = ViewerPipeline(
+            view_factory=self._view_factory,
+            compile_view=self._compile_view,
+        )
+        next_pipeline._render_items = [*self._render_items, item]
+        next_pipeline._effect_items = list(self._effect_items)
+        return next_pipeline
+
+    def effect(
+        self, item: EffectNode[CompiledViewT, Any] | PipelineGroup
+    ) -> ViewerPipeline[SceneT, RenderViewT, CompiledViewT]:
+        """Return a new pipeline with an effect item appended."""
+        next_pipeline = ViewerPipeline(
+            view_factory=self._view_factory,
+            compile_view=self._compile_view,
+        )
+        next_pipeline._render_items = list(self._render_items)
+        next_pipeline._effect_items = [*self._effect_items, item]
         return next_pipeline
 
     def build(
         self,
-        render_data: RenderDataT,
+        source_scene: SceneT,
         viewer_state: ViewerState,
-    ) -> GuiPipelineResult[RenderDataT]:
-        """Build the pipeline, instantiating runtime state and merging configs.
+    ) -> ViewerPipelineResult[SceneT, RenderViewT, CompiledViewT]:
+        """Build the pipeline for one source scene."""
+        (
+            config_model,
+            default_config,
+            configured_render_nodes,
+            configured_effect_nodes,
+        ) = _build_config_model(self._render_items, self._effect_items)
 
-        Args:
-            render_data: The prepared scene render data (output of SetupPipeline).
-            viewer_state: Shared viewer state for camera/overlay control.
-
-        Returns:
-            A ``GuiPipelineResult`` ready to bind a config and backend render fn.
-        """
-        active_ops = [
-            op
-            for op in self._ops
-            if self._allow_prepared_copy or not op.requires_prepared_copy
-        ]
-        combined_model, default_instance = _build_combined_config_model(
-            active_ops
-        )
-
-        op_runtime_states: dict[str, Any] = {}
-        for op in active_ops:
-            if op.runtime_state_factory is not None:
-                op_runtime_states[op.name] = op.runtime_state_factory()
+        effect_states: dict[str, Any] = {}
+        for configured_effect in configured_effect_nodes:
+            if configured_effect.node.state_factory is not None:
+                effect_states[configured_effect.node.name] = (
+                    configured_effect.node.state_factory()
+                )
 
         pipeline_state = _PipelineRuntimeState(
-            ops=active_ops,
-            op_configs={op.name: op.config_model for op in active_ops},
-            op_runtime_states=op_runtime_states,
-            render_data=render_data,
+            render_nodes=configured_render_nodes,
+            effect_nodes=configured_effect_nodes,
+            effect_states=effect_states,
+            source_scene=source_scene,
             viewer_state=viewer_state,
-            prepare_copy_fn=self._prepare_copy_fn,
+            view_factory=self._view_factory,
+            compile_view=self._compile_view,
         )
-
-        return GuiPipelineResult(
-            config_model=combined_model,
-            default_config=default_instance,
-            runtime_state=op_runtime_states,
+        return ViewerPipelineResult(
+            config_model=config_model,
+            default_config=default_config,
+            runtime_state=effect_states,
             _pipeline_state=pipeline_state,
         )
+
+
+__all__ = [
+    "AbstractRenderView",
+    "EffectNode",
+    "EmptyConfig",
+    "PipelineGroup",
+    "RenderNode",
+    "RenderResult",
+    "ViewerPipeline",
+    "ViewerPipelineResult",
+    "effect_node",
+    "render_node",
+]

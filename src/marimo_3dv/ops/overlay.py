@@ -10,7 +10,7 @@ import numpy as np
 from pydantic import BaseModel, Field
 
 from marimo_3dv.pipeline.context import ViewerContext
-from marimo_3dv.pipeline.gui import GuiOp, RenderResult
+from marimo_3dv.pipeline.gui import EffectNode, RenderResult, effect_node
 from marimo_3dv.viewer.widget import CameraState
 
 
@@ -164,8 +164,8 @@ def _paint_ray_hook(
     return RenderResult(image=image, metadata=result.metadata)
 
 
-def paint_ray_op() -> GuiOp[Any]:
-    """Return a GuiOp that stores clicked world-space rays and draws them.
+def paint_ray_op() -> EffectNode[Any, _PaintRayState]:
+    """Return an effect node that stores clicked world-space rays and draws them.
 
     On each click, a world-space ray is computed from the clicked pixel and
     the current camera state. Rays are stored in runtime state and projected
@@ -173,15 +173,14 @@ def paint_ray_op() -> GuiOp[Any]:
     backend renders.
 
     Returns:
-        A ``GuiOp`` configured for the ``image_overlay`` stage.
+        An ``EffectNode`` configured for the post-render effect stage.
     """
-    return GuiOp(
+    return effect_node(
         name="paint_ray",
         config_model=PaintRayConfig,
         default_config=PaintRayConfig(),
-        stage="image_overlay",
-        hook=_paint_ray_hook,
-        runtime_state_factory=_PaintRayState,
+        apply=_paint_ray_hook,
+        state_factory=_PaintRayState,
     )
 
 

@@ -190,14 +190,21 @@ class _FrameStreamServer:
                     client_sent_at_ms, int | float
                 ):
                     continue
-                await websocket.send_json(
-                    {
-                        "type": "clock_sync_pong",
-                        "ping_id": int(ping_id),
-                        "client_sent_at_ms": float(client_sent_at_ms),
-                        "server_received_at_ms": (time.perf_counter() * 1000.0),
-                    }
-                )
+                try:
+                    await websocket.send_json(
+                        {
+                            "type": "clock_sync_pong",
+                            "ping_id": int(ping_id),
+                            "client_sent_at_ms": float(client_sent_at_ms),
+                            "server_received_at_ms": (
+                                time.perf_counter() * 1000.0
+                            ),
+                        }
+                    )
+                except RuntimeError as exc:
+                    if "close message has been sent" in str(exc):
+                        break
+                    raise
         except WebSocketDisconnect:
             pass
         finally:

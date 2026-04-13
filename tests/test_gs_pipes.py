@@ -1,4 +1,4 @@
-"""Tests for built-in 3DGS GUI pipeline ops."""
+"""Tests for declarative GS render-view nodes and effects."""
 
 from dataclasses import dataclass
 
@@ -6,22 +6,21 @@ import numpy as np
 import torch
 
 from marimo_3dv.ops.gs import (
+    CompiledGsRenderView,
     FilterOpacityConfig,
     FilterSizeConfig,
     MaxShDegreeConfig,
     ShowDistributionConfig,
+    compile_gs_render_view,
     filter_opacity_op,
     filter_size_op,
+    gs_render_view,
     max_sh_degree_op,
     show_distribution_op,
 )
 from marimo_3dv.pipeline.context import ViewerContext
 from marimo_3dv.pipeline.gui import RenderResult
 from marimo_3dv.viewer.widget import ViewerState
-
-# ---------------------------------------------------------------------------
-# Minimal fake SplatRenderData for testing
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -33,10 +32,6 @@ class _FakeSplats:
     opacity_logits: torch.Tensor
     sh_degree: int
 
-    @property
-    def _keep_mask(self):
-        return None
-
 
 def _make_splats(
     n: int = 10,
@@ -44,7 +39,6 @@ def _make_splats(
     opacity_logit: float = 0.0,
     log_scale: float = 0.0,
 ) -> _FakeSplats:
-    """Create n splats with uniform opacity and scale."""
     num_bases = (sh_degree + 1) ** 2
     return _FakeSplats(
         center_positions=torch.zeros(n, 3),
@@ -60,171 +54,128 @@ def _context() -> ViewerContext:
     return ViewerContext(viewer_state=ViewerState(), last_click=None)
 
 
-# ---------------------------------------------------------------------------
-# max_sh_degree
-# ---------------------------------------------------------------------------
-
-
-def test_max_sh_degree_caps_degree():
+def test_max_sh_degree_is_symbolic_until_compile() -> None:
     splats = _make_splats(sh_degree=3)
-    op = max_sh_degree_op(default_degree=1)
-    config = MaxShDegreeConfig(max_sh_degree=1)
-    result = op.hook(splats, config, _context(), None)
-    assert result.sh_degree == 1
-    assert result.spherical_harmonics.shape[1] == 4  # (1+1)^2
+    view = gs_render_view(splats)
+    result = max_sh_degree_op().apply(
+        view,
+        MaxShDegreeConfig(max_sh_degree=1),
+        _context(),
+    )
+
+    assert result is not view
+    assert result.max_sh_degree == 1
+    assert splats.spherical_harmonics.shape[1] == 16
+
+    compiled = compile_gs_render_view(result)
+    assert compiled.sh_degree == 1
+    assert compiled.spherical_harmonics.shape[1] == 4
 
 
-def test_max_sh_degree_cannot_exceed_data_degree():
-    splats = _make_splats(sh_degree=2)
-    op = max_sh_degree_op()
-    config = MaxShDegreeConfig(max_sh_degree=3)
-    result = op.hook(splats, config, _context(), None)
-    assert result.sh_degree == 2
-
-
-def test_max_sh_degree_zero_gives_diffuse():
-    splats = _make_splats(sh_degree=3)
-    op = max_sh_degree_op()
-    config = MaxShDegreeConfig(max_sh_degree=0)
-    result = op.hook(splats, config, _context(), None)
-    assert result.sh_degree == 0
-    assert result.spherical_harmonics.shape[1] == 1
-
-
-# ---------------------------------------------------------------------------
-# filter_opacity
-# ---------------------------------------------------------------------------
-
-
-def test_filter_opacity_removes_low_opacity_splats():
-    # logit=0 → sigmoid≈0.5; logit=-5 → sigmoid≈0.007 (below threshold 0.1)
+def test_filter_opacity_builds_symbolic_mask() -> None:
     low = _make_splats(n=5, opacity_logit=-5.0)
     high = _make_splats(n=5, opacity_logit=2.0)
 
-    # Combine manually
     @dataclass
     class Mixed:
-        opacity_logits: torch.Tensor
+        center_positions: torch.Tensor
         log_half_extents: torch.Tensor
+        quaternion_orientation: torch.Tensor
         spherical_harmonics: torch.Tensor
+        opacity_logits: torch.Tensor
         sh_degree: int = 3
 
     mixed = Mixed(
-        opacity_logits=torch.cat([low.opacity_logits, high.opacity_logits]),
+        center_positions=torch.zeros(10, 3),
         log_half_extents=torch.cat(
             [low.log_half_extents, high.log_half_extents]
         ),
+        quaternion_orientation=torch.zeros(10, 4),
         spherical_harmonics=torch.cat(
             [low.spherical_harmonics, high.spherical_harmonics]
         ),
+        opacity_logits=torch.cat([low.opacity_logits, high.opacity_logits]),
     )
 
-    op = filter_opacity_op(default_threshold=0.1)
-    config = FilterOpacityConfig(opacity_threshold=0.1)
-    result = op.hook(mixed, config, _context(), None)
-
-    assert (
-        result.opacity_logits.shape[0] == 5
-    )  # only high-opacity splats remain
-
-
-def test_filter_opacity_zero_threshold_keeps_all():
-    splats = _make_splats(n=8, opacity_logit=0.0)
-    op = filter_opacity_op()
-    config = FilterOpacityConfig(opacity_threshold=0.0)
-    result = op.hook(splats, config, _context(), None)
-    assert result.opacity_logits.shape[0] == 8
-
-
-# ---------------------------------------------------------------------------
-# filter_size
-# ---------------------------------------------------------------------------
-
-
-def test_filter_size_removes_large_splats():
-    @dataclass
-    class MixedSize:
-        opacity_logits: torch.Tensor
-        log_half_extents: torch.Tensor
-        spherical_harmonics: torch.Tensor
-        sh_degree: int = 3
-
-    small_log = torch.full((5, 3), 0.5)
-    large_log = torch.full((5, 3), 5.0)
-    mixed = MixedSize(
-        opacity_logits=torch.zeros(10, 1),
-        log_half_extents=torch.cat([small_log, large_log]),
-        spherical_harmonics=torch.zeros(10, 16, 3),
-    )
-
-    op = filter_size_op()
-    config = FilterSizeConfig(max_log_extent=2.0)
-    result = op.hook(mixed, config, _context(), None)
-    assert result.log_half_extents.shape[0] == 5
-
-
-def test_prepare_filters_materialize_one_mutable_copy() -> None:
-    splats = _make_splats(n=8, opacity_logit=2.0, log_scale=0.5)
-    opacity_op = filter_opacity_op(default_threshold=0.1)
-    size_op = filter_size_op(default_max_log_extent=1.0)
-
-    filtered = opacity_op.hook(
-        splats,
+    view = filter_opacity_op(default_threshold=0.1).apply(
+        gs_render_view(mixed),
         FilterOpacityConfig(opacity_threshold=0.1),
         _context(),
-        None,
     )
-    filtered_again = size_op.hook(
-        filtered,
-        FilterSizeConfig(max_log_extent=1.0),
+    assert view.keep_mask is not None
+    compiled = compile_gs_render_view(view)
+    assert compiled.opacity_logits.shape[0] == 5
+
+
+def test_filter_size_composes_with_existing_mask() -> None:
+    splats = _make_splats(n=8, opacity_logit=2.0, log_scale=0.5)
+    opacity_view = filter_opacity_op(default_threshold=0.1).apply(
+        gs_render_view(splats),
+        FilterOpacityConfig(opacity_threshold=0.1),
+        _context(),
+    )
+    filtered_view = filter_size_op(default_max_log_extent=0.1).apply(
+        opacity_view,
+        FilterSizeConfig(max_log_extent=0.1),
+        _context(),
+    )
+
+    assert filtered_view.keep_mask is not None
+    compiled = compile_gs_render_view(filtered_view)
+    assert compiled.log_half_extents.shape[0] == 0
+    assert splats.log_half_extents.shape[0] == 8
+
+
+def test_compile_gs_render_view_preserves_source_tensors_without_filters() -> (
+    None
+):
+    splats = _make_splats(n=4)
+    compiled = compile_gs_render_view(gs_render_view(splats))
+    assert isinstance(compiled, CompiledGsRenderView)
+    assert (
+        compiled.opacity_logits.data_ptr() == splats.opacity_logits.data_ptr()
+    )
+    assert (
+        compiled.spherical_harmonics.data_ptr()
+        == splats.spherical_harmonics.data_ptr()
+    )
+
+
+def test_show_distribution_no_op_when_disabled() -> None:
+    image = np.zeros((8, 8, 3), dtype=np.uint8)
+    result = RenderResult(
+        image=image,
+        metadata={"projected_means": torch.zeros(5, 2)},
+    )
+    out = show_distribution_op().apply(
+        result,
+        ShowDistributionConfig(show_distribution=False),
         _context(),
         None,
     )
-
-    assert filtered_again is filtered
-    assert (
-        filtered_again.opacity_logits.data_ptr()
-        != splats.opacity_logits.data_ptr()
-    )
-    assert (
-        filtered_again.log_half_extents.data_ptr()
-        != splats.log_half_extents.data_ptr()
-    )
-
-
-# ---------------------------------------------------------------------------
-# show_distribution
-# ---------------------------------------------------------------------------
-
-
-def test_show_distribution_no_op_when_disabled():
-    image = np.zeros((8, 8, 3), dtype=np.uint8)
-    result = RenderResult(
-        image=image, metadata={"projected_means": torch.zeros(5, 2)}
-    )
-    op = show_distribution_op()
-    config = ShowDistributionConfig(show_distribution=False)
-    out = op.hook(result, config, _context(), None)
     assert out is result
 
 
-def test_show_distribution_no_op_without_metadata():
+def test_show_distribution_no_op_without_metadata() -> None:
     image = np.zeros((8, 8, 3), dtype=np.uint8)
     result = RenderResult(image=image, metadata={})
-    op = show_distribution_op()
-    config = ShowDistributionConfig(show_distribution=True)
-    out = op.hook(result, config, _context(), None)
+    out = show_distribution_op().apply(
+        result,
+        ShowDistributionConfig(show_distribution=True),
+        _context(),
+        None,
+    )
     assert out is result
 
 
-def test_show_distribution_blends_image():
+def test_show_distribution_blends_image() -> None:
     image = np.zeros((16, 16, 3), dtype=np.uint8)
     means = torch.tensor([[4.0, 4.0], [8.0, 8.0], [12.0, 12.0]])
     result = RenderResult(image=image, metadata={"projected_means": means})
-    op = show_distribution_op()
-    config = ShowDistributionConfig(
-        show_distribution=True, distribution_alpha=0.5
+    out = show_distribution_op().apply(
+        result,
+        ShowDistributionConfig(show_distribution=True, distribution_alpha=0.5),
+        _context(),
+        None,
     )
-    out = op.hook(result, config, _context(), None)
-    # Output image should differ from all-black input
     assert not np.array_equal(out.image, image)

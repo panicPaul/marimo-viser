@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
 from collections.abc import Callable
@@ -16,6 +17,8 @@ from marimo_3dv import (
 )
 from marimo_3dv.viewer.widget import (
     _convert_cam_to_world_between_conventions,
+    _FrameStreamServer,
+    _FrameStreamState,
     _LatestOnlyRenderer,
     _NativeViewerAnyWidget,
     _normalize_frame,
@@ -201,6 +204,47 @@ def test_viewer_last_click_reads_synced_widget_state() -> None:
         click.camera_state.cam_to_world,
     )
     assert viewer.get_last_click().x == click.x
+
+
+def test_frame_stream_server_ignores_send_after_close_race() -> None:
+    class _FakeWebSocket:
+        path_params = {"stream_id": "stream"}
+        query_params = {"token": "token"}
+
+        def __init__(self) -> None:
+            self._receive_count = 0
+
+        async def accept(self) -> None:
+            return None
+
+        async def receive(self) -> dict[str, object]:
+            if self._receive_count == 0:
+                self._receive_count += 1
+                return {
+                    "type": "websocket.receive",
+                    "text": (
+                        '{"type":"clock_sync_ping","ping_id":1,'
+                        '"client_sent_at_ms":1.0}'
+                    ),
+                }
+            return {"type": "websocket.disconnect"}
+
+        async def send_json(self, payload: dict[str, object]) -> None:
+            del payload
+            raise RuntimeError(
+                'Cannot call "send" once a close message has been sent.'
+            )
+
+        async def close(self, code: int) -> None:
+            del code
+            return None
+
+    server = _FrameStreamServer.__new__(_FrameStreamServer)
+    server._lock = threading.Lock()
+    server._streams = {"stream": _FrameStreamState(token="token")}
+    server._loop = None
+
+    asyncio.run(server._websocket_endpoint(_FakeWebSocket()))
 
 
 def test_stable_anywidget_uses_virtual_file_js_url(

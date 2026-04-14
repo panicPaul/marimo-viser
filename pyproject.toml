@@ -37,9 +37,41 @@ dependencies = [
 [project.scripts]
 marimo-3dv = "marimo_3dv:main"
 
+[project.optional-dependencies]
+cu128 = [
+    "torch>=2.11.0",
+]
+cu130 = [
+    "torch>=2.11.0",
+]
+
 [build-system]
 requires = ["uv_build>=0.9.3,<0.10.0"]
 build-backend = "uv_build"
+
+[tool.uv]
+conflicts = [
+    [
+        { extra = "cu128" },
+        { extra = "cu130" },
+    ],
+]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu128", extra = "cu128" },
+    { index = "pytorch-cu130", extra = "cu130" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
 
 
 

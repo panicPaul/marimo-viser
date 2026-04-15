@@ -27,7 +27,7 @@ from marimo_3dv.pipeline.gui import (
     effect_node,
     render_node,
 )
-from marimo_3dv.viewer.widget import ViewerState
+from marimo_3dv.viewer.widget import ViewerState, _best_effort_cuda_cleanup
 
 
 @runtime_checkable
@@ -175,8 +175,7 @@ def cleanup_before_splat_reload(
     gc.collect()
 
     if torch.cuda.is_available() and empty_cuda_cache:
-        torch.cuda.empty_cache()
-        torch.cuda.ipc_collect()
+        _best_effort_cuda_cleanup()
 
 
 def load_splat_scene(path: Path) -> SplatScene:

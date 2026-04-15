@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import atexit
 import asyncio
 import concurrent.futures
 import contextlib
+import gc
 import json
 import secrets
+import signal
 import socket
 import threading
 import time
 import traceback
 import weakref
+import warnings
 from collections.abc import Callable, Iterator, MutableMapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -45,6 +49,85 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 
 CameraConvention = Literal["opencv", "opengl", "blender", "colmap"]
 _ASSET_DIR = Path(__file__).resolve().parent / "assets"
+_ACTIVE_MARIMO_VIEWERS: dict[int, weakref.ReferenceType[MarimoViewer]] = {}
+_PROCESS_CLEANUP_REGISTERED = False
+
+
+def _best_effort_cuda_cleanup() -> None:
+    """Release CUDA cache without failing teardown on a poisoned context."""
+    if not torch.cuda.is_available():
+        return
+
+    cleanup_steps = (
+        ("empty_cache", torch.cuda.empty_cache),
+        ("ipc_collect", torch.cuda.ipc_collect),
+    )
+    for step_name, cleanup_step in cleanup_steps:
+        try:
+            cleanup_step()
+        except Exception as error:
+            warnings.warn(
+                "CUDA cleanup during viewer teardown failed while calling "
+                f"`torch.cuda.{step_name}()`: {error}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            break
+
+
+def _cleanup_active_marimo_viewers() -> None:
+    """Release notebook viewer resources during process teardown."""
+    viewer_refs = list(_ACTIVE_MARIMO_VIEWERS.values())
+    _ACTIVE_MARIMO_VIEWERS.clear()
+    for viewer_ref in viewer_refs:
+        viewer = viewer_ref()
+        if viewer is None:
+            continue
+        with contextlib.suppress(Exception):
+            viewer.close()
+
+    gc.collect()
+
+    _best_effort_cuda_cleanup()
+
+
+def _register_process_cleanup_handlers() -> None:
+    """Install best-effort cleanup hooks for normal process termination."""
+    global _PROCESS_CLEANUP_REGISTERED
+    if _PROCESS_CLEANUP_REGISTERED:
+        return
+    _PROCESS_CLEANUP_REGISTERED = True
+
+    atexit.register(_cleanup_active_marimo_viewers)
+
+    def _make_handler(
+        previous_handler: object,
+    ) -> Callable[[int, object | None], None]:
+        def _handler(signum: int, frame: object | None) -> None:
+            _cleanup_active_marimo_viewers()
+
+            if callable(previous_handler):
+                previous_handler(signum, frame)
+                return
+            if previous_handler == signal.SIG_IGN:
+                return
+            if signum == signal.SIGINT:
+                raise KeyboardInterrupt
+            raise SystemExit(128 + signum)
+
+        return _handler
+
+    cleanup_signals = [signal.SIGINT, signal.SIGTERM]
+    if hasattr(signal, "SIGHUP"):
+        cleanup_signals.append(signal.SIGHUP)
+
+    for cleanup_signal in cleanup_signals:
+        with contextlib.suppress(ValueError):
+            previous_handler = signal.getsignal(cleanup_signal)
+            signal.signal(
+                cleanup_signal,
+                _make_handler(previous_handler),
+            )
 
 
 def _find_free_port(start: int = 8765, attempts: int = 64) -> int:
@@ -1279,6 +1362,8 @@ class MarimoViewer(_StableMarimoAnyWidget):
         self._render_completion_condition = threading.Condition()
         self._completed_revisions: dict[int, Exception | None] = {}
         self._closed = False
+        _register_process_cleanup_handlers()
+        _ACTIVE_MARIMO_VIEWERS[id(self)] = weakref.ref(self)
         try:
             self._main_loop: asyncio.AbstractEventLoop | None = (
                 asyncio.get_running_loop()
@@ -1324,6 +1409,7 @@ class MarimoViewer(_StableMarimoAnyWidget):
         if self._closed:
             return
         self._closed = True
+        _ACTIVE_MARIMO_VIEWERS.pop(id(self), None)
         self.widget.unobserve(
             self._on_camera_revision_change, names=["_camera_revision"]
         )

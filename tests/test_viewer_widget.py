@@ -29,6 +29,7 @@ from marimo_3dv import (
 from marimo_3dv.gui.pydantic import PydanticGui
 from marimo_3dv.viewer.controls import DesktopPydanticControls
 from marimo_3dv.viewer.widget import (
+    _cleanup_active_marimo_viewers,
     _convert_cam_to_world_between_conventions,
     _FrameStreamServer,
     _FrameStreamState,
@@ -674,6 +675,26 @@ def test_marimo_viewer_reuses_explicit_state_across_reruns() -> None:
     assert second_viewer.get_camera_state().height == 24
     assert second_viewer.get_camera_state().fov_degrees == 45.0
     assert first_viewer._closed is True
+
+
+def test_process_cleanup_closes_active_viewers() -> None:
+    first_viewer = marimo_viewer(
+        lambda camera_state: np.zeros(
+            (camera_state.height, camera_state.width, 3), dtype=np.uint8
+        ),
+        state=ViewerState(),
+    )
+    second_viewer = marimo_viewer(
+        lambda camera_state: np.zeros(
+            (camera_state.height, camera_state.width, 3), dtype=np.uint8
+        ),
+        state=ViewerState(),
+    )
+
+    _cleanup_active_marimo_viewers()
+
+    assert first_viewer._closed is True
+    assert second_viewer._closed is True
 
 
 def test_viewer_state_can_reset_camera_to_initial_value() -> None:

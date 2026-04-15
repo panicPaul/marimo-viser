@@ -359,7 +359,9 @@ class DesktopViewer:
         """Orbit around the tracked target using JS-equivalent math."""
         viewer_up = self._viewer_up_vector()
         offset = self._position - self._target
-        yaw_rotation = _rot_axis(viewer_up, -dx * _ORBIT_SENSITIVITY)
+        orbit_dx = dx if self._state.orbit_invert_x else -dx
+        orbit_dy = dy if self._state.orbit_invert_y else -dy
+        yaw_rotation = _rot_axis(viewer_up, orbit_dx * _ORBIT_SENSITIVITY)
         yawed_offset = yaw_rotation @ offset
         yawed_forward = _normalize(-yawed_offset)
         pitch_axis = np.cross(yawed_forward, viewer_up)
@@ -368,7 +370,7 @@ class DesktopViewer:
         pitch_axis = _normalize(pitch_axis)
         pitch_rotation = _rot_axis(
             pitch_axis,
-            -dy * _ORBIT_SENSITIVITY,
+            orbit_dy * _ORBIT_SENSITIVITY,
         )
         orbited_offset = pitch_rotation @ yawed_offset
         new_position = self._target + orbited_offset
@@ -379,6 +381,8 @@ class DesktopViewer:
         _position, right, up, _forward = self._camera_axes()
         cam = self._state.camera_state
         _window_width, window_height = self._get_window_size()
+        pan_dx = -dx if self._state.pan_invert_x else dx
+        pan_dy = -dy if self._state.pan_invert_y else dy
         fov_radians = np.deg2rad(cam.fov_degrees)
         pan_scale = (
             max(_MIN_ORBIT_DISTANCE, self._orbit_distance)
@@ -386,7 +390,7 @@ class DesktopViewer:
             / max(1, window_height)
             * 2.0
         )
-        delta = -dx * pan_scale * right + dy * pan_scale * up
+        delta = -pan_dx * pan_scale * right + pan_dy * pan_scale * up
         self._set_camera_pose(self._position + delta, self._target + delta)
 
     def _apply_dolly(self, scroll_y: float) -> None:

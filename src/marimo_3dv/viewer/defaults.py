@@ -67,6 +67,15 @@ class ViewerNavigationConfig(BaseModel):
     sprint_multiplier: float = Field(default=4.0, ge=1.0)
 
 
+class ViewerInteractionConfig(BaseModel):
+    """Pointer interaction tuning."""
+
+    orbit_invert_x: bool = Field(default=False)
+    orbit_invert_y: bool = Field(default=False)
+    pan_invert_x: bool = Field(default=False)
+    pan_invert_y: bool = Field(default=False)
+
+
 class ViewerTransformConfig(BaseModel):
     """Viewer-frame transform defaults."""
 
@@ -82,6 +91,9 @@ class ViewerControlsConfig(BaseModel):
     render: ViewerRenderConfig = Field(default_factory=ViewerRenderConfig)
     navigation: ViewerNavigationConfig = Field(
         default_factory=ViewerNavigationConfig
+    )
+    interaction: ViewerInteractionConfig = Field(
+        default_factory=ViewerInteractionConfig
     )
     transform: ViewerTransformConfig = Field(
         default_factory=ViewerTransformConfig
@@ -150,6 +162,12 @@ def viewer_controls_config(
             move_speed=viewer_state.keyboard_move_speed,
             sprint_multiplier=viewer_state.keyboard_sprint_multiplier,
         ),
+        interaction=ViewerInteractionConfig(
+            orbit_invert_x=viewer_state.orbit_invert_x,
+            orbit_invert_y=viewer_state.orbit_invert_y,
+            pan_invert_x=viewer_state.pan_invert_x,
+            pan_invert_y=viewer_state.pan_invert_y,
+        ),
         transform=ViewerTransformConfig(
             rotation=ViewerRotationConfig(
                 x_degrees=viewer_state.viewer_rotation_x_degrees,
@@ -188,6 +206,12 @@ def apply_viewer_config(
         .set_keyboard_navigation(
             config.navigation.move_speed,
             config.navigation.sprint_multiplier,
+        )
+        .set_pointer_controls(
+            config.interaction.orbit_invert_x,
+            config.interaction.orbit_invert_y,
+            config.interaction.pan_invert_x,
+            config.interaction.pan_invert_y,
         )
         .set_viewer_rotation(
             config.transform.rotation.x_degrees,

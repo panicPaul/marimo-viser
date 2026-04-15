@@ -192,6 +192,53 @@ def test_desktop_viewer_get_snapshot_returns_copy(
     assert viewer._latest_frame[0, 0, 0] == 17
 
 
+def test_desktop_viewer_orbit_drag_right_moves_camera_right(
+    qapp: QApplication,
+) -> None:
+    del qapp
+    viewer = DesktopViewer(
+        lambda camera_state: np.zeros(
+            (camera_state.height, camera_state.width, 3), dtype=np.uint8
+        )
+    )
+
+    viewer._apply_orbit(10, 0)
+
+    assert viewer.get_camera_state().position[0] > 0.0
+
+
+def test_desktop_viewer_orbit_drag_up_moves_camera_up(
+    qapp: QApplication,
+) -> None:
+    del qapp
+    viewer = DesktopViewer(
+        lambda camera_state: np.zeros(
+            (camera_state.height, camera_state.width, 3), dtype=np.uint8
+        )
+    )
+
+    viewer._apply_orbit(0, -10)
+
+    assert viewer.get_camera_state().position[1] > 0.0
+
+
+def test_desktop_viewer_orbit_inversion_flags_flip_drag_direction(
+    qapp: QApplication,
+) -> None:
+    del qapp
+    viewer = DesktopViewer(
+        lambda camera_state: np.zeros(
+            (camera_state.height, camera_state.width, 3), dtype=np.uint8
+        ),
+        state=ViewerState(orbit_invert_x=True, orbit_invert_y=True),
+    )
+
+    viewer._apply_orbit(10, -10)
+
+    assert viewer.get_camera_state().position[0] < 0.0
+    assert viewer.get_camera_state().position[1] < 0.0
+
+
 def test_desktop_viewer_defaults_stats_on_without_explicit_state(
     qapp: QApplication,
 ) -> None:

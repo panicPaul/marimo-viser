@@ -7,22 +7,26 @@ import warnings
 def test_core_imports_work():
     from marimo_3dv import (
         CameraState,
+        LinkedViewerStateField,
         MarimoViewer,
         Viewer,
         ViewerBackendBundle,
         ViewerCameraConfig,
         ViewerClick,
         ViewerControlsConfig,
+        ViewerInteractionConfig,
         ViewerNavigationConfig,
         ViewerOverlayConfig,
         ViewerRenderConfig,
         ViewerState,
+        ViewerStateLink,
         ViewerTransformConfig,
         apply_viewer_config,
         apply_viewer_pipeline_config,
         backend_bundle,
         cleanup_before_splat_reload,
         gs_backend_bundle,
+        link_viewer_states,
         load_splat_scene,
         load_splat_scene_from_config,
         pick_splat_load_config,
@@ -35,22 +39,26 @@ def test_core_imports_work():
     )
 
     assert CameraState is not None
+    assert LinkedViewerStateField is not None
     assert MarimoViewer is not None
     assert Viewer is not None
     assert ViewerBackendBundle is not None
     assert ViewerCameraConfig is not None
     assert ViewerClick is not None
     assert ViewerControlsConfig is not None
+    assert ViewerInteractionConfig is not None
     assert ViewerNavigationConfig is not None
     assert ViewerOverlayConfig is not None
     assert ViewerRenderConfig is not None
     assert ViewerState is not None
+    assert ViewerStateLink is not None
     assert ViewerTransformConfig is not None
     assert apply_viewer_config is not None
     assert apply_viewer_pipeline_config is not None
     assert backend_bundle is not None
     assert cleanup_before_splat_reload is not None
     assert gs_backend_bundle is not None
+    assert link_viewer_states is not None
     assert load_splat_scene is not None
     assert load_splat_scene_from_config is not None
     assert pick_splat_load_config is not None

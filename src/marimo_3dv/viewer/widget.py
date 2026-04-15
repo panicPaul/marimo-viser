@@ -48,6 +48,14 @@ from starlette.routing import WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 CameraConvention = Literal["opencv", "opengl", "blender", "colmap"]
+LinkedViewerStateField = Literal[
+    "camera_state",
+    "show_axes",
+    "show_horizon",
+    "show_origin",
+    "show_stats",
+]
+_ViewerStateChangeListener = Callable[[LinkedViewerStateField], None]
 _ASSET_DIR = Path(__file__).resolve().parent / "assets"
 _ACTIVE_MARIMO_VIEWERS: dict[int, weakref.ReferenceType[MarimoViewer]] = {}
 _PROCESS_CLEANUP_REGISTERED = False
@@ -684,6 +692,10 @@ class ViewerState:
     origin: tuple[float, float, float] = (0.0, 0.0, 0.0)
     keyboard_move_speed: float = 0.125
     keyboard_sprint_multiplier: float = 4.0
+    orbit_invert_x: bool = False
+    orbit_invert_y: bool = False
+    pan_invert_x: bool = False
+    pan_invert_y: bool = False
     _reset_camera_callback: Callable[[CameraState], None] | None = None
     _viewer_rotation_callback: Callable[[float, float, float], None] | None = (
         None
@@ -694,6 +706,14 @@ class ViewerState:
     _show_stats_callback: Callable[[bool], None] | None = None
     _origin_callback: Callable[[float, float, float], None] | None = None
     _keyboard_navigation_callback: Callable[[float, float], None] | None = None
+    _pointer_controls_callback: (
+        Callable[[bool, bool, bool, bool], None] | None
+    ) = None
+    _field_listeners: list[_ViewerStateChangeListener] = field(
+        init=False,
+        repr=False,
+        default_factory=list,
+    )
     _active_marimo_viewer_ref: weakref.ReferenceType[MarimoViewer] | None = None
 
     def __init__(
@@ -713,6 +733,10 @@ class ViewerState:
         show_stats: bool = True,
         keyboard_move_speed: float = 0.125,
         keyboard_sprint_multiplier: float = 4.0,
+        orbit_invert_x: bool = False,
+        orbit_invert_y: bool = False,
+        pan_invert_x: bool = False,
+        pan_invert_y: bool = False,
     ) -> None:
         resolved_camera_state = camera_state or CameraState.default(
             camera_convention=camera_convention
@@ -773,6 +797,10 @@ class ViewerState:
         self.origin = (0.0, 0.0, 0.0)
         self.keyboard_move_speed = keyboard_move_speed
         self.keyboard_sprint_multiplier = keyboard_sprint_multiplier
+        self.orbit_invert_x = orbit_invert_x
+        self.orbit_invert_y = orbit_invert_y
+        self.pan_invert_x = pan_invert_x
+        self.pan_invert_y = pan_invert_y
         self._reset_camera_callback = None
         self._viewer_rotation_callback = None
         self._show_axes_callback = None
@@ -781,21 +809,120 @@ class ViewerState:
         self._show_stats_callback = None
         self._origin_callback = None
         self._keyboard_navigation_callback = None
+        self._pointer_controls_callback = None
+        self._field_listeners = []
+
+    def _register_field_listener(
+        self,
+        listener: _ViewerStateChangeListener,
+    ) -> None:
+        """Register a private state-change listener."""
+        self._field_listeners.append(listener)
+
+    def _unregister_field_listener(
+        self,
+        listener: _ViewerStateChangeListener,
+    ) -> None:
+        """Remove a previously registered private state-change listener."""
+        with contextlib.suppress(ValueError):
+            self._field_listeners.remove(listener)
+
+    def _notify_field_listeners(self, field: LinkedViewerStateField) -> None:
+        """Notify private state-change listeners about one field update."""
+        for listener in tuple(self._field_listeners):
+            listener(field)
+
+    def _set_camera_internal(
+        self,
+        camera_state: CameraState,
+        *,
+        push_to_viewer: bool,
+        notify_listeners: bool,
+    ) -> ViewerState:
+        """Update the current camera state with optional viewer push."""
+        self.camera_state = camera_state
+        self.camera_convention = camera_state.camera_convention
+        if push_to_viewer and self._reset_camera_callback is not None:
+            self._reset_camera_callback(self.camera_state)
+        if notify_listeners:
+            self._notify_field_listeners("camera_state")
+        return self
+
+    def _set_show_axes_internal(
+        self,
+        show_axes: bool,
+        *,
+        push_to_viewer: bool,
+        notify_listeners: bool,
+    ) -> ViewerState:
+        """Update axis-gizmo visibility with optional viewer push."""
+        self.show_axes = show_axes
+        if push_to_viewer and self._show_axes_callback is not None:
+            self._show_axes_callback(show_axes)
+        if notify_listeners:
+            self._notify_field_listeners("show_axes")
+        return self
+
+    def _set_show_horizon_internal(
+        self,
+        show_horizon: bool,
+        *,
+        push_to_viewer: bool,
+        notify_listeners: bool,
+    ) -> ViewerState:
+        """Update horizon visibility with optional viewer push."""
+        self.show_horizon = show_horizon
+        if push_to_viewer and self._show_horizon_callback is not None:
+            self._show_horizon_callback(show_horizon)
+        if notify_listeners:
+            self._notify_field_listeners("show_horizon")
+        return self
+
+    def _set_show_origin_internal(
+        self,
+        show_origin: bool,
+        *,
+        push_to_viewer: bool,
+        notify_listeners: bool,
+    ) -> ViewerState:
+        """Update origin visibility with optional viewer push."""
+        self.show_origin = show_origin
+        if push_to_viewer and self._show_origin_callback is not None:
+            self._show_origin_callback(show_origin)
+        if notify_listeners:
+            self._notify_field_listeners("show_origin")
+        return self
+
+    def _set_show_stats_internal(
+        self,
+        show_stats: bool,
+        *,
+        push_to_viewer: bool,
+        notify_listeners: bool,
+    ) -> ViewerState:
+        """Update stats visibility with optional viewer push."""
+        self.show_stats = show_stats
+        if push_to_viewer and self._show_stats_callback is not None:
+            self._show_stats_callback(show_stats)
+        if notify_listeners:
+            self._notify_field_listeners("show_stats")
+        return self
 
     def reset_camera(self) -> ViewerState:
         """Reset the current camera state back to the initial camera state."""
-        self.camera_state = self.initial_camera_state
-        if self._reset_camera_callback is not None:
-            self._reset_camera_callback(self.camera_state)
-        return self
+        return self._set_camera_internal(
+            self.initial_camera_state,
+            push_to_viewer=True,
+            notify_listeners=True,
+        )
 
     def set_camera(self, camera_state: CameraState) -> ViewerState:
         """Set the current camera state and push it into the live viewer."""
-        self.camera_state = camera_state
-        self.camera_convention = camera_state.camera_convention
-        if self._reset_camera_callback is not None:
-            self._reset_camera_callback(self.camera_state)
-        return self
+        return self._set_camera_internal(
+            camera_state,
+            push_to_viewer=True,
+            notify_listeners=True,
+        )
 
     def set_fov_degrees(
         self,
@@ -821,9 +948,11 @@ class ViewerState:
         self.initial_camera_state = initial_camera
         if push_to_viewer:
             return self.set_camera(current_camera)
-        self.camera_state = current_camera
-        self.camera_convention = current_camera.camera_convention
-        return self
+        return self._set_camera_internal(
+            current_camera,
+            push_to_viewer=False,
+            notify_listeners=True,
+        )
 
     def set_viewer_rotation(
         self,
@@ -841,31 +970,35 @@ class ViewerState:
 
     def set_show_axes(self, show_axes: bool) -> ViewerState:
         """Set the axis-gizmo visibility and push it into the live viewer."""
-        self.show_axes = show_axes
-        if self._show_axes_callback is not None:
-            self._show_axes_callback(show_axes)
-        return self
+        return self._set_show_axes_internal(
+            show_axes,
+            push_to_viewer=True,
+            notify_listeners=True,
+        )
 
     def set_show_horizon(self, show_horizon: bool) -> ViewerState:
         """Set the horizon overlay visibility and push it into the live viewer."""
-        self.show_horizon = show_horizon
-        if self._show_horizon_callback is not None:
-            self._show_horizon_callback(show_horizon)
-        return self
+        return self._set_show_horizon_internal(
+            show_horizon,
+            push_to_viewer=True,
+            notify_listeners=True,
+        )
 
     def set_show_origin(self, show_origin: bool) -> ViewerState:
         """Set the origin marker visibility and push it into the live viewer."""
-        self.show_origin = show_origin
-        if self._show_origin_callback is not None:
-            self._show_origin_callback(show_origin)
-        return self
+        return self._set_show_origin_internal(
+            show_origin,
+            push_to_viewer=True,
+            notify_listeners=True,
+        )
 
     def set_show_stats(self, show_stats: bool) -> ViewerState:
         """Set the stats overlay visibility and push it into the live viewer."""
-        self.show_stats = show_stats
-        if self._show_stats_callback is not None:
-            self._show_stats_callback(show_stats)
-        return self
+        return self._set_show_stats_internal(
+            show_stats,
+            push_to_viewer=True,
+            notify_listeners=True,
+        )
 
     def set_origin(self, x: float, y: float, z: float) -> ViewerState:
         """Set the world-space origin marker position in the live viewer."""
@@ -896,6 +1029,27 @@ class ViewerState:
             )
         return self
 
+    def set_pointer_controls(
+        self,
+        orbit_invert_x: bool,
+        orbit_invert_y: bool,
+        pan_invert_x: bool,
+        pan_invert_y: bool,
+    ) -> ViewerState:
+        """Set pointer drag inversion controls for orbit and pan."""
+        self.orbit_invert_x = orbit_invert_x
+        self.orbit_invert_y = orbit_invert_y
+        self.pan_invert_x = pan_invert_x
+        self.pan_invert_y = pan_invert_y
+        if self._pointer_controls_callback is not None:
+            self._pointer_controls_callback(
+                orbit_invert_x,
+                orbit_invert_y,
+                pan_invert_x,
+                pan_invert_y,
+            )
+        return self
+
     def copy(self) -> ViewerState:
         """Return a shallow copy of the current viewer configuration/state."""
         copied = ViewerState(
@@ -914,6 +1068,10 @@ class ViewerState:
             show_stats=self.show_stats,
             keyboard_move_speed=self.keyboard_move_speed,
             keyboard_sprint_multiplier=self.keyboard_sprint_multiplier,
+            orbit_invert_x=self.orbit_invert_x,
+            orbit_invert_y=self.orbit_invert_y,
+            pan_invert_x=self.pan_invert_x,
+            pan_invert_y=self.pan_invert_y,
         )
         copied.initial_camera_state = self.initial_camera_state
         copied.viewer_rotation_x_degrees = self.viewer_rotation_x_degrees
@@ -1283,6 +1441,10 @@ class _NativeViewerAnyWidget(anywidget.AnyWidget):
     origin_z = traitlets.Float(0.0).tag(sync=True)
     keyboard_move_speed = traitlets.Float(0.125).tag(sync=True)
     keyboard_sprint_multiplier = traitlets.Float(4.0).tag(sync=True)
+    orbit_invert_x = traitlets.Bool(False).tag(sync=True)
+    orbit_invert_y = traitlets.Bool(False).tag(sync=True)
+    pan_invert_x = traitlets.Bool(False).tag(sync=True)
+    pan_invert_y = traitlets.Bool(False).tag(sync=True)
     controls_hint = traitlets.Unicode(
         "Orbit: drag | Pan: right-drag | Move: WASDQE | Zoom: wheel"
     ).tag(sync=True)
@@ -1306,6 +1468,10 @@ class _NativeViewerAnyWidget(anywidget.AnyWidget):
         origin_z: float,
         keyboard_move_speed: float = 0.125,
         keyboard_sprint_multiplier: float = 4.0,
+        orbit_invert_x: bool = False,
+        orbit_invert_y: bool = False,
+        pan_invert_x: bool = False,
+        pan_invert_y: bool = False,
         stream_port: int,
         stream_path: str,
         stream_token: str,
@@ -1325,6 +1491,10 @@ class _NativeViewerAnyWidget(anywidget.AnyWidget):
             origin_z=origin_z,
             keyboard_move_speed=keyboard_move_speed,
             keyboard_sprint_multiplier=keyboard_sprint_multiplier,
+            orbit_invert_x=orbit_invert_x,
+            orbit_invert_y=orbit_invert_y,
+            pan_invert_x=pan_invert_x,
+            pan_invert_y=pan_invert_y,
             stream_port=stream_port,
             stream_path=stream_path,
             stream_token=stream_token,
@@ -1402,6 +1572,9 @@ class MarimoViewer(_StableMarimoAnyWidget):
             self._state._keyboard_navigation_callback = (
                 self.set_keyboard_navigation
             )
+            self._state._pointer_controls_callback = (
+                self.set_pointer_controls
+            )
         self.rerender()
 
     def close(self) -> None:
@@ -1436,6 +1609,7 @@ class MarimoViewer(_StableMarimoAnyWidget):
             self._clear_state_callback("_show_stats_callback")
             self._clear_state_callback("_origin_callback")
             self._clear_state_callback("_keyboard_navigation_callback")
+            self._clear_state_callback("_pointer_controls_callback")
             active_ref = self._state._active_marimo_viewer_ref
             active_viewer = None if active_ref is None else active_ref()
             if active_viewer is self:
@@ -1594,7 +1768,11 @@ class MarimoViewer(_StableMarimoAnyWidget):
         """Persist the current camera state into the shared state object."""
         new_value = change.get("new")
         if isinstance(new_value, str) and self._state is not None:
-            self._state.camera_state = CameraState.from_json(new_value)
+            self._state._set_camera_internal(
+                CameraState.from_json(new_value),
+                push_to_viewer=False,
+                notify_listeners=True,
+            )
 
     def _on_last_click_json_change(self, change: dict[str, object]) -> None:
         """Persist the last click into the shared state object."""
@@ -1610,28 +1788,44 @@ class MarimoViewer(_StableMarimoAnyWidget):
         new_value = change.get("new")
         if not isinstance(new_value, bool) or self._state is None:
             return
-        self._state.show_axes = new_value
+        self._state._set_show_axes_internal(
+            new_value,
+            push_to_viewer=False,
+            notify_listeners=True,
+        )
 
     def _on_show_horizon_change(self, change: dict[str, object]) -> None:
         """Persist the horizon visibility into the shared state object."""
         new_value = change.get("new")
         if not isinstance(new_value, bool) or self._state is None:
             return
-        self._state.show_horizon = new_value
+        self._state._set_show_horizon_internal(
+            new_value,
+            push_to_viewer=False,
+            notify_listeners=True,
+        )
 
     def _on_show_origin_change(self, change: dict[str, object]) -> None:
         """Persist the origin visibility into the shared state object."""
         new_value = change.get("new")
         if not isinstance(new_value, bool) or self._state is None:
             return
-        self._state.show_origin = new_value
+        self._state._set_show_origin_internal(
+            new_value,
+            push_to_viewer=False,
+            notify_listeners=True,
+        )
 
     def _on_show_stats_change(self, change: dict[str, object]) -> None:
         """Persist the stats visibility into the shared state object."""
         new_value = change.get("new")
         if not isinstance(new_value, bool) or self._state is None:
             return
-        self._state.show_stats = new_value
+        self._state._set_show_stats_internal(
+            new_value,
+            push_to_viewer=False,
+            notify_listeners=True,
+        )
 
     def set_camera_state(self, camera_state: CameraState) -> None:
         """Apply a camera state and request a fresh render."""
@@ -1695,6 +1889,27 @@ class MarimoViewer(_StableMarimoAnyWidget):
         self.widget.keyboard_sprint_multiplier = sprint_multiplier
         self.widget.send_state(
             ["keyboard_move_speed", "keyboard_sprint_multiplier"]
+        )
+
+    def set_pointer_controls(
+        self,
+        orbit_invert_x: bool,
+        orbit_invert_y: bool,
+        pan_invert_x: bool,
+        pan_invert_y: bool,
+    ) -> None:
+        """Update pointer interaction inversion controls in the live viewer."""
+        self.widget.orbit_invert_x = orbit_invert_x
+        self.widget.orbit_invert_y = orbit_invert_y
+        self.widget.pan_invert_x = pan_invert_x
+        self.widget.pan_invert_y = pan_invert_y
+        self.widget.send_state(
+            [
+                "orbit_invert_x",
+                "orbit_invert_y",
+                "pan_invert_x",
+                "pan_invert_y",
+            ]
         )
 
     def rerender(self, *, interactive: bool = False) -> None:
@@ -2045,6 +2260,10 @@ def marimo_viewer(
         origin_z=state.origin[2],
         keyboard_move_speed=state.keyboard_move_speed,
         keyboard_sprint_multiplier=state.keyboard_sprint_multiplier,
+        orbit_invert_x=state.orbit_invert_x,
+        orbit_invert_y=state.orbit_invert_y,
+        pan_invert_x=state.pan_invert_x,
+        pan_invert_y=state.pan_invert_y,
         stream_port=stream_server.port,
         stream_path=f"/streams/{stream_id}",
         stream_token=stream_token,

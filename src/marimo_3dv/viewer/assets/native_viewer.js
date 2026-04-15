@@ -665,11 +665,19 @@ function updateCameraMatrix() {
     const radius = Math.max(1e-3, Math.hypot(...offset));
     const upReference = viewerUpVector();
     const yawAxis = upReference;
-    const yawRotation = axisAngleRotation(yawAxis, -deltaX * rotationSpeed);
+    const orbitDeltaX = Boolean(model.get("orbit_invert_x")) ? deltaX : -deltaX;
+    const orbitDeltaY = Boolean(model.get("orbit_invert_y")) ? deltaY : -deltaY;
+    const yawRotation = axisAngleRotation(
+      yawAxis,
+      orbitDeltaX * rotationSpeed,
+    );
     const yawedOffset = multiplyMat3Vec3(yawRotation, offset);
     const yawedForward = normalize(scale(yawedOffset, -1));
     const pitchAxis = normalize(cross(yawedForward, upReference));
-    const pitchRotation = axisAngleRotation(pitchAxis, -deltaY * rotationSpeed);
+    const pitchRotation = axisAngleRotation(
+      pitchAxis,
+      orbitDeltaY * rotationSpeed,
+    );
     const orbitedOffset = multiplyMat3Vec3(pitchRotation, yawedOffset);
     position = add(target, orbitedOffset);
     cameraState.cam_to_world = lookAtCamera(position, target, upReference);
@@ -680,14 +688,16 @@ function updateCameraMatrix() {
     const rotation = rotationFromCamToWorld(cameraState.cam_to_world);
     const right = normalize(matrixColumn(rotation, 0));
     const up = normalize(matrixColumn(rotation, 1));
+    const panDeltaX = Boolean(model.get("pan_invert_x")) ? -deltaX : deltaX;
+    const panDeltaY = Boolean(model.get("pan_invert_y")) ? -deltaY : deltaY;
     const scaleFactor =
       Math.max(1e-3, orbitDistance) *
       Math.tan((cameraState.fov_degrees * Math.PI / 180.0) / 2.0) /
       Math.max(1, frame.getBoundingClientRect().height) *
       2.0;
     const translation = add(
-      scale(right, -deltaX * scaleFactor),
-      scale(up, -deltaY * scaleFactor),
+      scale(right, -panDeltaX * scaleFactor),
+      scale(up, -panDeltaY * scaleFactor),
     );
     position = add(position, translation);
     target = add(target, translation);

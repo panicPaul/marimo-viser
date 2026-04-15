@@ -20,6 +20,7 @@ from marimo_3dv import (
     ViewerState,
     apply_viewer_config,
     apply_viewer_pipeline_config,
+    link_viewer_states,
     viewer_controls_config,
     viewer_controls_gui,
     viewer_controls_handle,
@@ -118,7 +119,12 @@ def test_viewer_controls_config_reflects_viewer_state() -> None:
         show_origin=True,
         show_stats=True,
     )
-    state.set_viewer_rotation(10.0, 20.0, 30.0).set_origin(1.0, 2.0, 3.0)
+    state.set_pointer_controls(
+        True,
+        False,
+        True,
+        False,
+    ).set_viewer_rotation(10.0, 20.0, 30.0).set_origin(1.0, 2.0, 3.0)
 
     config = viewer_controls_config(state)
 
@@ -133,6 +139,10 @@ def test_viewer_controls_config_reflects_viewer_state() -> None:
     assert config.render.internal_render_max_side == 2048
     assert config.navigation.move_speed == 0.125
     assert config.navigation.sprint_multiplier == 4.0
+    assert config.interaction.orbit_invert_x is True
+    assert config.interaction.orbit_invert_y is False
+    assert config.interaction.pan_invert_x is True
+    assert config.interaction.pan_invert_y is False
     assert config.transform.rotation.x_degrees == 10.0
     assert config.transform.rotation.y_degrees == 20.0
     assert config.transform.rotation.z_degrees == 30.0
@@ -158,6 +168,12 @@ def test_apply_viewer_config_updates_viewer_state() -> None:
             "internal_render_max_side": 1800,
         },
         navigation={"move_speed": 0.3, "sprint_multiplier": 6.0},
+        interaction={
+            "orbit_invert_x": True,
+            "orbit_invert_y": True,
+            "pan_invert_x": False,
+            "pan_invert_y": True,
+        },
         transform={
             "rotation": {
                 "x_degrees": 15.0,
@@ -183,6 +199,10 @@ def test_apply_viewer_config_updates_viewer_state() -> None:
     assert state.internal_render_max_side == 1800
     assert state.keyboard_move_speed == 0.3
     assert state.keyboard_sprint_multiplier == 6.0
+    assert state.orbit_invert_x is True
+    assert state.orbit_invert_y is True
+    assert state.pan_invert_x is False
+    assert state.pan_invert_y is True
     assert state.viewer_rotation_x_degrees == 15.0
     assert state.viewer_rotation_y_degrees == -25.0
     assert state.viewer_rotation_z_degrees == 45.0
@@ -311,6 +331,151 @@ def test_set_keyboard_navigation_updates_viewer_state() -> None:
     assert returned is state
     assert state.keyboard_move_speed == 0.4
     assert state.keyboard_sprint_multiplier == 5.0
+
+
+def test_set_pointer_controls_updates_viewer_state() -> None:
+    state = ViewerState()
+
+    returned = state.set_pointer_controls(True, False, True, True)
+
+    assert returned is state
+    assert state.orbit_invert_x is True
+    assert state.orbit_invert_y is False
+    assert state.pan_invert_x is True
+    assert state.pan_invert_y is True
+
+
+def test_link_viewer_states_initial_syncs_selected_fields() -> None:
+    primary = ViewerState(
+        camera_state=CameraState.default(width=64, height=48, fov_degrees=45.0),
+        show_axes=False,
+    )
+    secondary = ViewerState(
+        camera_state=CameraState.default(width=32, height=24, fov_degrees=70.0),
+        show_axes=True,
+    )
+
+    link = link_viewer_states(
+        primary,
+        secondary,
+        fields=("camera_state", "show_axes"),
+    )
+
+    assert secondary.camera_state.width == 64
+    assert secondary.camera_state.height == 48
+    assert secondary.camera_state.fov_degrees == 45.0
+    assert secondary.show_axes is False
+
+    link.close()
+
+
+def test_link_viewer_states_bidirectionally_syncs_updates() -> None:
+    primary = ViewerState(show_axes=True)
+    secondary = ViewerState(show_axes=True)
+    link = link_viewer_states(
+        primary,
+        secondary,
+        fields=("camera_state", "show_axes"),
+    )
+
+    updated_camera = CameraState.default(width=40, height=30, fov_degrees=55.0)
+    primary.set_camera(updated_camera)
+    secondary.set_show_axes(False)
+
+    assert secondary.camera_state.width == 40
+    assert secondary.camera_state.height == 30
+    assert secondary.camera_state.fov_degrees == 55.0
+    assert primary.show_axes is False
+
+    link.close()
+
+
+def test_link_viewer_states_ignores_unselected_fields() -> None:
+    primary = ViewerState(show_axes=True)
+    secondary = ViewerState(show_axes=True)
+    link = link_viewer_states(
+        primary,
+        secondary,
+        fields=("camera_state",),
+    )
+
+    primary.set_show_axes(False)
+
+    assert secondary.show_axes is True
+
+    link.close()
+
+
+def test_link_viewer_states_close_stops_sync() -> None:
+    primary = ViewerState()
+    secondary = ViewerState()
+    link = link_viewer_states(primary, secondary)
+
+    link.close()
+    primary.set_camera(CameraState.default(width=44, height=22, fov_degrees=50.0))
+
+    assert secondary.camera_state.width != 44
+    assert secondary.camera_state.height != 22
+
+
+def test_link_viewer_states_follows_widget_camera_updates() -> None:
+    primary_state = ViewerState(camera_state=CameraState.default(width=64, height=48))
+    secondary_state = ViewerState(camera_state=CameraState.default(width=32, height=24))
+    primary_viewer = marimo_viewer(
+        lambda camera_state: np.zeros(
+            (camera_state.height, camera_state.width, 3), dtype=np.uint8
+        ),
+        state=primary_state,
+    )
+    secondary_viewer = marimo_viewer(
+        lambda camera_state: np.zeros(
+            (camera_state.height, camera_state.width, 3), dtype=np.uint8
+        ),
+        state=secondary_state,
+    )
+    link = link_viewer_states(primary_state, secondary_state)
+    updated_camera = CameraState.default(width=28, height=18, fov_degrees=47.0)
+
+    primary_viewer.anywidget().camera_state_json = updated_camera.to_json()
+
+    _wait_until(lambda: secondary_viewer.get_camera_state().width == 28)
+    assert secondary_viewer.get_camera_state().height == 18
+    assert secondary_viewer.get_camera_state().fov_degrees == 47.0
+
+    link.close()
+    primary_viewer.close()
+    secondary_viewer.close()
+
+
+def test_link_viewer_states_follows_widget_overlay_updates() -> None:
+    primary_state = ViewerState(show_axes=True)
+    secondary_state = ViewerState(show_axes=True)
+    primary_viewer = marimo_viewer(
+        lambda camera_state: np.zeros(
+            (camera_state.height, camera_state.width, 3), dtype=np.uint8
+        ),
+        state=primary_state,
+    )
+    secondary_viewer = marimo_viewer(
+        lambda camera_state: np.zeros(
+            (camera_state.height, camera_state.width, 3), dtype=np.uint8
+        ),
+        state=secondary_state,
+    )
+    link = link_viewer_states(
+        primary_state,
+        secondary_state,
+        fields=("show_axes",),
+    )
+
+    primary_viewer.anywidget().show_axes = False
+
+    _wait_until(lambda: secondary_viewer.anywidget().show_axes is False)
+    assert secondary_state.show_axes is False
+
+    link.close()
+    primary_viewer.close()
+    secondary_viewer.close()
 
 
 def test_camera_state_with_convention_round_trips() -> None:
@@ -494,6 +659,10 @@ def test_stable_anywidget_uses_virtual_file_js_url(
         origin_x=0.0,
         origin_y=0.0,
         origin_z=0.0,
+        orbit_invert_x=False,
+        orbit_invert_y=False,
+        pan_invert_x=False,
+        pan_invert_y=False,
         stream_port=1,
         stream_path="/stream",
         stream_token="token",
